@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Algorithm lab - Pixel Battle</title>
+<style>
+body{font:15px/1.4 system-ui,sans-serif;background:#0f1220;color:#e8eaf6;margin:0;padding:16px;max-width:980px;margin:auto}
+h1{color:#ffb300} select,input,button{font:inherit;background:#232845;color:#e8eaf6;border:1px solid #2a3050;border-radius:8px;padding:6px 8px}
+input{width:60px} .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0}
+.wrap{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start} canvas{width:420px;max-width:100%;image-rendering:pixelated;background:#fff;border-radius:6px}
+table{border-collapse:collapse;font-size:13px} th,td{border-bottom:1px solid #2a3050;padding:3px 8px;text-align:right} a{color:#ffb300}
+</style></head><body>
+<h1>Algorithm lab</h1>
+<p>Worked examples from Week 2, run with the same code the game uses (<code>raster.js</code>). <a href="index.html">Back to the game</a></p>
+<div class="row">
+  <select id="alg"><option value="bres">Bresenham line (2,2)-(12,8)</option><option value="dda">DDA line (1,1)-(8,5)</option><option value="circ">Midpoint circle r = 10</option></select>
+  <span id="coords">x0 <input id="x0" value="2"> y0 <input id="y0" value="2"> x1 <input id="x1" value="12"> y1 <input id="y1" value="8"> r <input id="r" value="10"></span>
+  <button id="go">Run</button>
+</div>
+<div class="wrap"><canvas id="cv" width="24" height="24"></canvas><div><table id="tb"></table></div></div>
+<script src="raster.js"></script>
+<script>
+const $=id=>document.getElementById(id), cv=$('cv'), ctx=cv.getContext('2d');
+const presets={bres:[2,2,12,8],dda:[1,1,8,5]};
+$('alg').onchange=()=>{const p=presets[$('alg').value]; if(p){['x0','y0','x1','y1'].forEach((k,i)=>$(k).value=p[i]);}};
+$('go').onclick=()=>{
+  const N=24, fb=Raster.createFB(N,N,0), img=ctx.createImageData(N,N), alg=$('alg').value, rows=[];
+  const v=k=>parseInt($(k).value,10), plot=(x,y)=>Raster.setPixel(fb,x,y,1);
+  let head;
+  if(alg==='bres'){ head='<tr><th>k</th><th>p</th><th>choice</th><th>next pixel</th></tr>';
+    Raster.bresenham(v('x0'),v('y0'),v('x1'),v('y1'),plot,t=>rows.push(`<tr><td>${t.k}</td><td>${t.p}</td><td>${t.choice}</td><td>(${t.x}, ${t.y})</td></tr>`));
+  } else if(alg==='dda'){ head='<tr><th>k</th><th>x</th><th>y exact</th><th>plot</th></tr>';
+    Raster.dda(v('x0'),v('y0'),v('x1'),v('y1'),plot,t=>rows.push(`<tr><td>${t.k}</td><td>${t.x.toFixed(0)}</td><td>${t.y.toFixed(3)}</td><td>(${Math.floor(t.x+.5)}, ${Math.floor(t.y+.5)})</td></tr>`));
+  } else { head='<tr><th>p<sub>k</sub></th><th>next (x, y)</th><th>next p</th></tr>';
+    Raster.midpointCircle(v('r'),()=>{},t=>rows.push(`<tr><td>${t.p}</td><td>(${t.x}, ${t.y})</td><td>${t.next}</td></tr>`));
+    Raster.circle(12,12,Math.min(11,v('r')),plot,false);
+  }
+  for(let i=0;i<N*N;i++){const o=i*4,c=fb.data[i]?[224,103,66]:[255,255,255];img.data[o]=c[0];img.data[o+1]=c[1];img.data[o+2]=c[2];img.data[o+3]=255;}
+  ctx.putImageData(img,0,0); $('tb').innerHTML=head+rows.join('');
+};
+$('go').click();
+</script></body></html>

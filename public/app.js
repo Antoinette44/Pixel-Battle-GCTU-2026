@@ -1,0 +1,476 @@
+/* app.js - Pixel Battle browser client.
+   Pixels are only ever written with Raster.setPixel (our own code) into frame buffers.
+   Canvas elements are used purely as a screen to blit the finished buffer (putImageData / drawImage);
+   no lineTo / arc / fillRect / fill() calls are used anywhere.                                       */
+(() => {
+  'use strict';
+  const { COLOURS, TEAMS, NUM, BG } = Palette;
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get: (k, d) => { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} },
+  };
+
+  /* ---------------- state ---------------- */
+  let SIZE = 128;
+  let fb = Raster.createFB(SIZE, SIZE, BG);
+  let tool = 'pen', pts = [], colour = 16, myTeam = +store.get('pb_team', 0) || 0;
+  let readyAt = 0, cooldownMs = 5000, connected = false, seq = 0, ws = null, retry = 500, scores = TEAMS.map(() => 0);
+  let pid = store.get('pb_id', '');
+  if (!/^[\w-]{8,64}$/.test(pid)) {
+    pid = Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
+    store.set('pb_id', pid);
+  }
+
+  const baseCtx = $('base').getContext('2d');
+  const prevCtx = $('prev').getContext('2d');
+  let baseImg = baseCtx.createImageData(SIZE, SIZE);
+  let prevImg = prevCtx.createImageData(SIZE, SIZE);
+
+  /* ---------------- screen-level pixel writing (RGBA) ---------------- */
+  function plotRGBA(img, x, y, rgb, a) {
+    const o = (y * img.width + x) * 4;
+    img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = a;
+  }
+  function paintIndex(i, c) { plotRGBA(baseImg, i % SIZE, (i / SIZE) | 0, COLOURS[c].rgb, 255); }
+  function renderAll() {
+    for (let i = 0; i < fb.data.length; i++) paintIndex(i, fb.data[i]);
+    baseCtx.putImageData(baseImg, 0, 0);
+  }
+  function setSize(n) {
+    SIZE = n;
+    for (const id of ['base', 'prev']) { $(id).width = n; $(id).height = n; $(id).style.width = n + 'px'; $(id).style.height = n + 'px'; }
+    $('world').style.width = n + 'px'; $('world').style.height = n + 'px';
+    fb = Raster.createFB(n, n, BG);
+    baseImg = baseCtx.createImageData(n, n); prevImg = prevCtx.createImageData(n, n);
+    fitView();
+  }
+
+  /* ---------------- viewport: zoom + pan ---------------- */
+  const stage = $('stage'), world = $('world');
+  let z = 4, tx = 0, ty = 0;
+  const applyView = () => {
+    world.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
+    const grid = $('grid');
+    grid.style.setProperty('--grid-line-width', `${Math.min(0.075, 0.5 / z)}px`);
+    grid.style.opacity = Math.min(0.35, 0.12 + Math.max(0, z - 1) * 0.012);
+    $('zfit').title = 'zoom ' + z.toFixed(1) + 'x';
+  };
+  function fitView() {
+    const r = stage.getBoundingClientRect();
+    z = Math.max(1, Math.min(r.width, r.height) / SIZE * 0.96);
+    tx = (r.width - SIZE * z) / 2; ty = (r.height - SIZE * z) / 2;
+    applyView();
+  }
+  function zoomAt(cx, cy, factor) {
+    const nz = Math.min(48, Math.max(1, z * factor));
+    const k = nz / z;
+    tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k; z = nz;
+    applyView();
+  }
+  function toPixel(clientX, clientY) {
+    const r = stage.getBoundingClientRect();
+    return [Math.floor((clientX - r.left - tx) / z), Math.floor((clientY - r.top - ty) / z)];
+  }
+  $('zin').onclick = () => { const r = stage.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1.5); };
+  $('zout').onclick = () => { const r = stage.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1 / 1.5); };
+  $('zfit').onclick = fitView;
+  window.addEventListener('resize', fitView);
+  stage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const r = stage.getBoundingClientRect();
+    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
+  }, { passive: false });
+
+  // one finger: tap = place a point, drag = pan.  two fingers: pinch zoom + pan.
+  const ptrs = new Map();
+  let moved = false, pinchLast = null;
+  const pinchInfo = () => {
+    const [a, b] = [...ptrs.values()];
+    const r = stage.getBoundingClientRect();
+    return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2 - r.left, my: (a.y + b.y) / 2 - r.top };
+  };
+  stage.addEventListener('pointerdown', (e) => {
+    stage.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY });
+    if (ptrs.size === 1) moved = false;
+    else { moved = true; pinchLast = pinchInfo(); }
+  });
+  stage.addEventListener('pointermove', (e) => {
+    const p = ptrs.get(e.pointerId);
+    if (!p) { hoverAt(e.clientX, e.clientY); return; }
+    if (ptrs.size === 1) {
+      if (!moved && Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 6) moved = true;
+      if (moved) { tx += e.clientX - p.x; ty += e.clientY - p.y; applyView(); }
+      p.x = e.clientX; p.y = e.clientY;
+    } else if (ptrs.size === 2) {
+      p.x = e.clientX; p.y = e.clientY;
+      const cur = pinchInfo();
+      zoomAt(cur.mx, cur.my, cur.d / pinchLast.d);
+      tx += cur.mx - pinchLast.mx; ty += cur.my - pinchLast.my; applyView();
+      pinchLast = cur;
+    }
+  });
+  const endPtr = (e) => {
+    const p = ptrs.get(e.pointerId);
+    if (!p) return;
+    const wasTap = ptrs.size === 1 && !moved && e.type === 'pointerup';
+    ptrs.delete(e.pointerId);
+    if (ptrs.size === 1) { moved = true; const q = [...ptrs.values()][0]; q.sx = q.x; q.sy = q.y; }
+    if (wasTap) tap(...toPixel(e.clientX, e.clientY));
+  };
+  stage.addEventListener('pointerup', endPtr);
+  stage.addEventListener('pointercancel', endPtr);
+  stage.addEventListener('pointerleave', () => { $('hover').style.display = 'none'; });
+
+  function hoverAt(cx, cy) {
+    const [x, y] = toPixel(cx, cy);
+    const h = $('hover');
+    if (Raster.inBounds(fb, x, y)) {
+      h.style.display = 'block'; h.style.left = x + 'px'; h.style.top = y + 'px';
+      const c = COLOURS[fb.data[y * SIZE + x]];
+      $('coords').textContent = `x ${x}  y ${y}  ${c.name}`;
+    } else { h.style.display = 'none'; }
+  }
+
+  /* ---------------- tools ---------------- */
+  const TOOLS = [
+    { id: 'pen',     label: 'Pen',     need: 1, hint: 'Tap one pixel.' },
+    { id: 'line',    label: 'Line',    need: 2, hint: 'Tap the start, then the end (Bresenham).' },
+    { id: 'circle',  label: 'Circle',  need: 2, hint: 'Tap the centre, then a point on the rim (midpoint circle).' },
+    { id: 'polygon', label: 'Polygon', need: 3, hint: 'Tap 3 to 8 corners (scan-line fill).' },
+    { id: 'fill',    label: 'Bucket',  need: 1, hint: 'Tap inside an area (queue flood fill).' },
+  ];
+  const toolDef = () => TOOLS.find(t => t.id === tool);
+  function buildTools() {
+    $('tools').innerHTML = '';
+    TOOLS.forEach((t, k) => {
+      const b = document.createElement('button');
+      b.textContent = t.label; b.title = `${t.label} (key ${k + 1})`;
+      b.onclick = () => selectTool(t.id);
+      b.dataset.id = t.id;
+      $('tools').appendChild(b);
+    });
+  }
+  function selectTool(id) {
+    tool = id; pts = [];
+    for (const b of $('tools').children) b.classList.toggle('on', b.dataset.id === id);
+    $('fillOpt').classList.toggle('hidden', id !== 'circle');
+    $('undoPt').classList.toggle('hidden', id !== 'polygon');
+    $('hint').textContent = toolDef().hint;
+    updatePreview();
+  }
+
+  function tap(x, y) {
+    if (!Raster.inBounds(fb, x, y)) return;
+    if (tool === 'pen' || tool === 'fill') pts = [[x, y]];
+    else if (tool === 'line' || tool === 'circle') { if (pts.length === 0) pts = [[x, y]]; else pts = [pts[0], [x, y]]; }
+    else if (tool === 'polygon') { if (pts.length < Raster.LIMITS.maxPoly) pts.push([x, y]); else toast('A polygon can have at most ' + Raster.LIMITS.maxPoly + ' corners'); }
+    updatePreview();
+  }
+
+  function buildAction() {
+    if (pts.length < toolDef().need) return null;
+    return { tool, pts: pts.map(p => [p[0], p[1]]), c: colour, f: $('filled').checked ? 1 : 0 };
+  }
+
+  let previewOK = false;
+  function updatePreview() {
+    prevImg.data.fill(0);
+    const marks = $('marks'); marks.innerHTML = '';
+    for (const p of pts) {
+      const d = document.createElement('div'); d.className = 'mark';
+      d.style.left = p[0] + 'px'; d.style.top = p[1] + 'px'; marks.appendChild(d);
+    }
+    previewOK = false;
+    const a = buildAction();
+    const rgb = COLOURS[colour].rgb;
+    const plot = (x, y) => { if (Raster.inBounds(fb, x, y)) plotRGBA(prevImg, x, y, rgb, 210); };
+    setMsg('');
+    if (a) {
+      const r = Raster.rasterize(fb, a);
+      if (r.error) setMsg(r.error);
+      else {
+        let n = 0;
+        for (const i of r.idx) if (fb.data[i] !== a.c) { plot(i % SIZE, (i / SIZE) | 0); n++; }
+        if (n === 0) setMsg('Nothing would change here.');
+        else { previewOK = true; setMsg(n + ' pixel' + (n > 1 ? 's' : '') + ' will change', true); }
+      }
+    } else if (tool === 'polygon' && pts.length === 2) {
+      Raster.bresenham(pts[0][0], pts[0][1], pts[1][0], pts[1][1], plot);
+    }
+    prevCtx.putImageData(prevImg, 0, 0);
+    refreshButtons();
+  }
+
+  function setMsg(t, good) { $('msg').textContent = t; $('msg').className = 'msg' + (good ? ' good' : ''); }
+  const cooling = () => Date.now() < readyAt;
+  function refreshButtons() { $('place').disabled = !(previewOK && connected && !cooling()); }
+
+  $('cancel').onclick = () => { pts = []; updatePreview(); };
+  $('undoPt').onclick = () => { pts.pop(); updatePreview(); };
+  $('filled').onchange = updatePreview;
+  $('place').onclick = place;
+  function place() {
+    const a = buildAction();
+    if (!a || !previewOK || !connected || cooling()) return;
+    seq++;
+    ws.send(JSON.stringify({ t: 'act', seq, tool: a.tool, pts: a.pts, c: a.c, f: a.f }));
+    $('place').disabled = true;
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
+    if (e.key >= '1' && e.key <= '5') selectTool(TOOLS[+e.key - 1].id);
+    else if (e.key === 'Enter') place();
+    else if (e.key === 'Escape') $('cancel').onclick();
+  });
+
+  /* ---------------- palette ---------------- */
+  function buildPalette() {
+    const pal = $('palette'); pal.innerHTML = '';
+    COLOURS.forEach((c) => {
+      const b = document.createElement('button');
+      b.className = 'sw' + (c.team >= 0 ? ' team' : '');
+      b.style.background = c.hex; b.title = c.name + ' ' + c.hex;
+      if (c.team >= 0) b.dataset.t = TEAMS[c.team].name[0];
+      b.onclick = () => selectColour(c.index);
+      b.dataset.i = c.index;
+      pal.appendChild(b);
+    });
+    const t = $('palTable');
+    t.innerHTML = '<tr><th>#</th><th>Name</th><th>H</th><th>S</th><th>B</th><th>R</th><th>G</th><th>B</th><th>HEX</th></tr>' +
+      COLOURS.map(c => `<tr><td>${c.index}</td><td><span class="chip" style="background:${c.hex}"></span>${c.name}</td>` +
+        `<td>${c.h}&deg;</td><td>${c.s}%</td><td>${c.b}%</td><td>${c.rgb[0]}</td><td>${c.rgb[1]}</td><td>${c.rgb[2]}</td><td>${c.hex}</td></tr>`).join('');
+  }
+  function selectColour(i) {
+    colour = i;
+    for (const b of $('palette').children) b.classList.toggle('on', +b.dataset.i === i);
+    const c = COLOURS[i];
+    $('swatchInfo').innerHTML = `<b>#${c.index} ${c.name}</b>${c.team >= 0 ? ' (team colour)' : ''}<br>` +
+      `HSB: <b>H ${c.h}&deg; S ${c.s}% B ${c.b}%</b><br>RGB(${c.rgb.join(', ')}) &nbsp; <b>${c.hex}</b>`;
+    updatePreview();
+  }
+
+  /* ---------------- scoreboard ---------------- */
+  function buildScoreboard() {
+    const s = $('score'); s.innerHTML = '';
+    TEAMS.forEach((t) => {
+      const d = document.createElement('div'); d.className = 'sc'; d.id = 'sc' + t.id;
+      d.innerHTML = `<div class="bar" style="background:${COLOURS[t.colour].hex}"></div><div class="nm">${t.name}</div><div class="ct">0</div>`;
+      s.appendChild(d);
+    });
+  }
+  function renderScores() {
+    const total = scores.reduce((a, b) => a + b, 0) || 1;
+    TEAMS.forEach((t) => {
+      const d = $('sc' + t.id);
+      d.querySelector('.ct').textContent = scores[t.id] + (scores[t.id] ? '  (' + Math.round(scores[t.id] * 100 / total) + '%)' : '');
+      d.querySelector('.bar').style.width = (scores[t.id] * 100 / total) + '%';
+      d.classList.toggle('me', t.id === myTeam);
+    });
+  }
+
+  /* ---------------- cooldown display ---------------- */
+  setInterval(() => {
+    const rem = readyAt - Date.now();
+    if (rem > 0) {
+      $('cdfill').style.width = (100 * (1 - rem / cooldownMs)) + '%'; $('cdfill').style.background = '#e8a33c';
+      $('cdtxt').textContent = (rem / 1000).toFixed(1) + ' s';
+    } else { $('cdfill').style.width = '100%'; $('cdfill').style.background = '#3c3'; $('cdtxt').textContent = 'Ready'; }
+    refreshButtons();
+  }, 100);
+
+  /* ---------------- networking ---------------- */
+  function setStatus(on, txt) { connected = on; $('dot').className = 'dot' + (on ? '' : ' off'); $('statusTxt').textContent = txt; refreshButtons(); }
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}`);
+    ws.onopen = () => {
+      retry = 500;
+      ws.send(JSON.stringify({ t: 'hello', id: pid, name: store.get('pb_name', 'Player'), team: myTeam }));
+    };
+    ws.onclose = () => { setStatus(false, 'reconnecting...'); setTimeout(connect, retry); retry = Math.min(retry * 2, 5000); };
+    ws.onerror = () => {};
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.t === 'init') {
+        if (m.size !== SIZE) setSize(m.size);
+        for (let i = 0; i < m.grid.length; i++) fb.data[i] = parseInt(m.grid[i], 36);
+        renderAll(); scores = m.scores; renderScores();
+        cooldownMs = m.cooldown; readyAt = Date.now() + m.wait;
+        $('online').textContent = m.online; $('actions').textContent = m.actions;
+        setStatus(true, 'live'); updatePreview();
+      } else if (m.t === 'px') {
+        for (const i of m.idx) { Raster.setPixel(fb, i % SIZE, (i / SIZE) | 0, m.c); paintIndex(i, m.c); }
+        baseCtx.putImageData(baseImg, 0, 0);
+        scores = m.sc; renderScores();
+        $('actions').textContent = m.n + 1;
+        if (pts.length) updatePreview();
+      } else if (m.t === 'online') {
+        $('online').textContent = m.n;
+      } else if (m.t === 'ok') {
+        readyAt = Date.now() + m.wait; cooldownMs = m.wait;
+        pts = []; updatePreview(); setMsg('Placed ' + m.pixels + ' pixels', true);
+      } else if (m.t === 'rej') {
+        if (m.wait) readyAt = Date.now() + m.wait;
+        toast(m.reason); setMsg(m.reason); refreshButtons();
+      }
+    };
+  }
+
+  /* ---------------- toast ---------------- */
+  let toastTimer = 0;
+  function toast(t) { const e = $('toast'); e.textContent = t; e.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => e.classList.remove('show'), 2200); }
+
+  /* ---------------- export PNG (we fill the pixels ourselves) ---------------- */
+  $('exportPng').onclick = () => {
+    const S = 8, cv = document.createElement('canvas');
+    cv.width = SIZE * S; cv.height = SIZE * S;
+    const ctx = cv.getContext('2d'), img = ctx.createImageData(cv.width, cv.height);
+    for (let y = 0; y < cv.height; y++) for (let x = 0; x < cv.width; x++) {
+      plotRGBA(img, x, y, COLOURS[fb.data[((y / S) | 0) * SIZE + ((x / S) | 0)]].rgb, 255);
+    }
+    ctx.putImageData(img, 0, 0);
+    cv.toBlob((blob) => download(blob, 'pixel-battle.png'));
+  };
+  function download(blob, name) {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  /* ---------------- time-lapse replay ---------------- */
+  const rpView = $('rpView'), rpCtx = rpView.getContext('2d');
+  const rpOff = document.createElement('canvas'), rpOffCtx = rpOff.getContext('2d');
+  const rp = { log: [], fb: null, img: null, n: 0, playing: false, ap: 0, last: 0, rec: null };
+
+  function rpReset() {
+    rpOff.width = SIZE; rpOff.height = SIZE;
+    rp.fb = Raster.createFB(SIZE, SIZE, BG);
+    rp.img = rpOffCtx.createImageData(SIZE, SIZE);
+    for (let i = 0; i < SIZE * SIZE; i++) plotRGBA(rp.img, i % SIZE, (i / SIZE) | 0, COLOURS[BG].rgb, 255);
+    rp.n = 0;
+  }
+  function rpAdvance(target) {
+    while (rp.n < target) {
+      const e = rp.log[rp.n];
+      const res = Raster.applyAction(rp.fb, e);
+      if (!res.error) for (const [i] of res.changes) plotRGBA(rp.img, i % SIZE, (i / SIZE) | 0, COLOURS[e.c].rgb, 255);
+      rp.n++;
+    }
+  }
+  function rpDraw() {
+    rpOffCtx.putImageData(rp.img, 0, 0);
+    rpCtx.imageSmoothingEnabled = false;
+    rpCtx.drawImage(rpOff, 0, 0, rpView.width, rpView.height);
+    const N = rp.log.length;
+    $('rpSeek').value = rp.n;
+    if (rp.n === 0) { $('rpInfo').textContent = `0 / ${N} actions`; return; }
+    const e = rp.log[rp.n - 1], t0 = rp.log[0].ts, s = Math.round((e.ts - t0) / 1000);
+    $('rpInfo').textContent = `${rp.n} / ${N} actions  |  battle time ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}  |  ${e.p} (${TEAMS[e.tm].name}) used ${e.tool}`;
+  }
+  function rpSeekTo(n) { if (n < rp.n) rpReset(); rpAdvance(n); rpDraw(); }
+  function rpRate() {
+    const v = $('rpSpeed').value, N = rp.log.length;
+    if (v === 'fit30') return Math.max(1, N / 30);
+    if (v === 'fit60') return Math.max(1, N / 60);
+    return +v;
+  }
+  function rpTick(now) {
+    if (!rp.playing) return;
+    const dt = Math.min(0.2, (now - rp.last) / 1000); rp.last = now;
+    rp.ap += dt * rpRate();
+    const target = Math.min(rp.log.length, Math.floor(rp.ap));
+    if (target > rp.n) rpAdvance(target);
+    rpDraw();
+    if (rp.n >= rp.log.length) { rpStop(); return; }
+    requestAnimationFrame(rpTick);
+  }
+  function rpPlay() {
+    if (!rp.log.length) return;
+    if (rp.n >= rp.log.length) { rpReset(); }
+    rp.ap = rp.n; rp.playing = true; rp.last = performance.now();
+    $('rpPlay').textContent = 'Pause';
+    requestAnimationFrame(rpTick);
+  }
+  function rpStop() {
+    rp.playing = false; $('rpPlay').textContent = 'Play';
+    if (rp.rec) { const r = rp.rec; rp.rec = null; setTimeout(() => r.stop(), 500); }
+  }
+  $('rpLoad').onclick = async () => {
+    try {
+      const r = await fetch('/api/log', { cache: 'no-store' }); const j = await r.json();
+      rp.log = j.log; rpReset(); rpDraw();
+      $('rpSeek').max = rp.log.length; $('rpSeek').disabled = !rp.log.length;
+      $('rpPlay').disabled = !rp.log.length; $('rpRec').disabled = !rp.log.length;
+      if (!rp.log.length) $('rpInfo').textContent = 'No actions yet - paint something first!';
+    } catch (_) { toast('Could not load the log'); }
+  };
+  $('rpPlay').onclick = () => { if (rp.playing) rpStop(); else rpPlay(); };
+  $('rpSeek').oninput = () => { if (rp.playing) rpStop(); rpSeekTo(+$('rpSeek').value); };
+  $('rpRec').onclick = () => {
+    if (!window.MediaRecorder || !rpView.captureStream) return toast('Video recording is not supported in this browser');
+    rpStop(); rpReset(); rpDraw();
+    const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    const mime = types.find(t => MediaRecorder.isTypeSupported(t));
+    const rec = new MediaRecorder(rpView.captureStream(30), mime ? { mimeType: mime, videoBitsPerSecond: 4e6 } : undefined);
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = () => download(new Blob(chunks, { type: 'video/webm' }), 'pixel-battle-replay.webm');
+    rec.start(); rp.rec = rec; rpPlay();
+    toast('Recording... it downloads when the replay ends');
+  };
+
+  /* ---------------- intro flow: welcome > rules > team > confirm > start ---------------- */
+  const TEAM_WORD = ['Red', 'Blue', 'Green', 'Gold'];
+  let teamPicked = store.get('pb_team', null) !== null;   // returning players keep their team
+  function showStep(n) {
+    document.querySelectorAll('#join .step').forEach((s) => s.classList.toggle('on', +s.dataset.step === n));
+    document.querySelectorAll('#wizDots i').forEach((d, i) => d.classList.toggle('on', i <= n));
+  }
+  function fillConfirm() {
+    const t = TEAMS[myTeam], hex = COLOURS[t.colour].hex;
+    $('teamBadge').style.background = hex;
+    $('teamBadge').textContent = TEAM_WORD[myTeam][0];
+    $('teamMsg').textContent = `You are on the ${TEAM_WORD[myTeam]} team!`;
+    $('teamMsg').style.color = hex;
+    $('teamSub').textContent = `${t.name}, ${($('nameIn').value.trim() || 'Player')}. Paint with ${TEAM_WORD[myTeam].toLowerCase()} and grab as much canvas as you can.`;
+  }
+  function buildJoin() {
+    const pick = $('teamPick'); pick.innerHTML = '';
+    TEAMS.forEach((t) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = t.name; b.dataset.t = t.id;
+      b.style.borderColor = COLOURS[t.colour].hex;
+      b.onclick = () => {
+        myTeam = t.id; teamPicked = true; $('toConfirm').disabled = false;
+        for (const x of pick.children) x.classList.toggle('on', +x.dataset.t === myTeam);
+      };
+      pick.appendChild(b);
+    });
+    if (teamPicked) { pick.children[myTeam].classList.add('on'); $('toConfirm').disabled = false; }
+    $('nameIn').value = store.get('pb_name', '');
+    document.querySelectorAll('#join [data-go]').forEach((b) => {
+      b.onclick = () => { const n = +b.dataset.go; if (n === 3) fillConfirm(); showStep(n); };
+    });
+    const sel = $('teamSel');
+    TEAMS.forEach((t) => { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; sel.appendChild(o); });
+    sel.onchange = () => {
+      myTeam = +sel.value; store.set('pb_team', myTeam); renderScores(); colour = TEAMS[myTeam].colour; selectColour(colour);
+      if (connected) ws.send(JSON.stringify({ t: 'team', team: myTeam }));
+    };
+  }
+  $('joinBtn').onclick = () => {
+    store.set('pb_name', $('nameIn').value.trim() || 'Player');
+    store.set('pb_team', myTeam);
+    $('join').classList.add('hidden');
+    $('teamSel').value = myTeam;
+    colour = TEAMS[myTeam].colour; selectColour(colour); renderScores();
+    fitView(); connect();
+    toast(`You are on the ${TEAM_WORD[myTeam]} team. Good luck!`);
+  };
+
+  buildTools(); buildPalette(); buildScoreboard(); buildJoin();
+  selectTool('pen'); selectColour(TEAMS[myTeam].colour); fitView(); renderScores();
+  setSize(SIZE); renderAll(); setStatus(false, 'not joined');
+})();

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Pixel Battle - GCTU Tech Club</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<body>
+
+<!-- Intro flow: welcome -> how to play + rules -> pick team -> "you are on X team" -> Start -->
+<div id="join" class="overlay">
+  <div class="card wiz">
+    <div class="dots" id="wizDots"><i class="on"></i><i></i><i></i><i></i></div>
+
+    <!-- 1. Welcome -->
+    <section class="step on" data-step="0">
+      <div class="logo" aria-hidden="true"><b style="background:#E61919"></b><b style="background:#0A5DE6"></b><b style="background:#0A7A1B"></b><b style="background:#FFB300"></b></div>
+      <h1>Pixel Battle</h1>
+      <p class="lead">Welcome to the GCTU Tech Club open day!</p>
+      <p class="muted">One shared canvas. Four teams. Paint, claim territory and defend it, live with everyone on the Wi-Fi.</p>
+      <button class="primary big" type="button" data-go="1">Let's go</button>
+    </section>
+
+    <!-- 2. How to play + rules -->
+    <section class="step" data-step="1">
+      <h2>How to play</h2>
+      <ol class="how">
+        <li><b>Pick a tool:</b> Pen, Line, Circle, Polygon or Bucket.</li>
+        <li><b>Pick a colour</b> from the palette (your team colour is in there).</li>
+        <li><b>Tap the canvas</b> to place points. Drag to move, pinch or scroll to zoom.</li>
+        <li><b>Press Place</b> to paint it for everyone to see.</li>
+      </ol>
+      <h2>Rules</h2>
+      <ul class="rules">
+        <li>You can paint once every <b>5 seconds</b> (watch the cooldown bar).</li>
+        <li>Each shape is limited: circle radius up to <b>20</b>, polygons up to <b>8</b> corners, bucket fills up to <b>1500</b> pixels.</li>
+        <li>The team with the most pixels on the canvas <b>wins</b>.</li>
+        <li>Be kind: no offensive drawings.</li>
+      </ul>
+      <div class="row nav">
+        <button type="button" data-go="0">Back</button>
+        <button class="primary" type="button" data-go="2">Choose my team</button>
+      </div>
+    </section>
+
+    <!-- 3. Name + team -->
+    <section class="step" data-step="2">
+      <h2>Choose your team</h2>
+      <label>Your name <input id="nameIn" maxlength="16" autocomplete="off" placeholder="e.g. Ama"></label>
+      <div class="label">Tap a team</div>
+      <div id="teamPick" class="teams"></div>
+      <div class="row nav">
+        <button type="button" data-go="1">Back</button>
+        <button id="toConfirm" class="primary" type="button" data-go="3" disabled>Continue</button>
+      </div>
+    </section>
+
+    <!-- 4. Team confirmation + Start -->
+    <section class="step" data-step="3">
+      <div id="teamBadge" class="badge"></div>
+      <h2 id="teamMsg">You are on the Red team!</h2>
+      <p id="teamSub" class="muted"></p>
+      <button id="joinBtn" class="primary big" type="button">Start</button>
+      <div class="row nav"><button type="button" data-go="2">Change team</button></div>
+    </section>
+  </div>
+</div>
+
+<header>
+  <div class="brand">Pixel Battle</div>
+  <div class="hstat">
+    <span id="dot" class="dot off"></span>
+    <span id="statusTxt">connecting</span>
+  </div>
+
+  <!-- Keep the rest of your original HTML -->
+
+<header>
+  <div class="brand">Pixel Battle</div>
+  <div class="hstat"><span id="dot" class="dot off"></span><span id="statusTxt">connecting</span></div>
+  <div class="hstat">Players: <b id="online">0</b></div>
+  <div class="hstat">Actions: <b id="actions">0</b></div>
+  <nav><a href="lab.html" target="_blank">Algorithm lab</a></nav>
+</header>
+
+<section id="score" aria-label="Team scoreboard"></section>
+
+<main>
+  <div id="stage">
+    <div id="world">
+      <canvas id="base" width="128" height="128"></canvas>
+      <canvas id="prev" width="128" height="128"></canvas>
+      <div id="grid" aria-hidden="true"></div>
+      <div id="hover"></div>
+      <div id="marks"></div>
+    </div>
+    <div id="hud">
+      <span id="coords">x - y -</span>
+      <button id="zin" title="Zoom in">+</button>
+      <button id="zout" title="Zoom out">&minus;</button>
+      <button id="zfit" title="Fit to screen">Fit</button>
+    </div>
+  </div>
+
+  <aside id="panel">
+    <div class="row cd">
+      <div id="cdbar"><div id="cdfill"></div></div>
+      <span id="cdtxt">Ready</span>
+    </div>
+
+    <div id="tools" class="tools"></div>
+
+    <div class="row opts">
+      <label id="fillOpt" class="chk hidden"><input type="checkbox" id="filled"> Filled disc</label>
+      <span id="hint" class="muted"></span>
+    </div>
+
+    <div id="palette" class="palette"></div>
+    <div id="swatchInfo" class="info"></div>
+
+    <div class="row actions">
+      <button id="undoPt" class="hidden">Undo point</button>
+      <button id="cancel">Cancel</button>
+      <button id="place" class="primary" disabled>Place</button>
+    </div>
+    <div id="msg" class="msg"></div>
+
+    <div class="row">
+      <label>Team
+        <select id="teamSel"></select>
+      </label>
+      <button id="exportPng">Export PNG</button>
+    </div>
+
+    <details>
+      <summary>Palette sheet (HSB &rarr; RGB / HEX)</summary>
+      <table id="palTable"></table>
+    </details>
+  </aside>
+</main>
+
+<section id="replay">
+  <h2>Time-lapse replay</h2>
+  <div class="rp">
+    <canvas id="rpView" width="512" height="512"></canvas>
+    <div class="rpc">
+      <div class="row">
+        <button id="rpLoad" class="primary">Load battle log</button>
+        <button id="rpPlay" disabled>Play</button>
+        <select id="rpSpeed">
+          <option value="fit30">Fit in 30 s</option>
+          <option value="fit60">Fit in 60 s</option>
+          <option value="5">5 actions/s</option>
+          <option value="20">20 actions/s</option>
+          <option value="100">100 actions/s</option>
+        </select>
+      </div>
+      <input id="rpSeek" type="range" min="0" max="0" value="0" disabled>
+      <div id="rpInfo" class="muted">Load the log to start.</div>
+      <div class="row"><button id="rpRec" disabled>Record replay as video (.webm)</button></div>
+    </div>
+  </div>
+</section>
+
+<div id="toast"></div>
+
+<script src="palette.js"></script>
+<script src="raster.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

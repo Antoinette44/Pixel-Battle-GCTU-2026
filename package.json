@@ -1,0 +1,14 @@
+{
+  "name": "pixel-battle",
+  "version": "1.0.0",
+  "description": "CSSD 315 Brief 1 - Pixel Battle: a real-time shared pixel canvas with hand-written rasterizers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/raster.test.js",
+    "loadtest": "node tools/loadtest.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": { "ws": "^8.18.0" },
+  "license": "MIT"
+}
