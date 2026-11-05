@@ -7,7 +7,9 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
+const crypto = require('crypto');
 const R = require('./public/raster.js');
+const B = require('./public/board.js');
 const P = require('./public/palette.js');
 
 const PORT = +process.env.PORT || 3000;
@@ -18,18 +20,37 @@ const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const LOG_FILE = path.join(DATA_DIR, 'actions.ndjson');
 
 /* ---------------- state ---------------- */
-let fb = R.createFB(SIZE, SIZE, P.BG);
-let log = [];                                   // action log (used for the time-lapse)
+let board = B.create(SIZE, SIZE, P.BG);          // frame buffer + pixel owners + undo history (public/board.js)
+let log = [];                                   // action log (used for the time-lapse); undo is logged too
 let scores = P.TEAMS.map(() => 0);              // pixels per team colour
+let mine = new Map();                           // player key -> log positions of that player's drawings (for undo)
+
 const colourToTeam = new Map(P.TEAMS.map(t => [t.colour, t.id]));
 const nextAllowed = new Map();                  // player id -> time the next action is allowed
+const nextUndo = new Map();                     // player id -> time the next undo is allowed (anti-spam)
+const UNDO_GAP_MS = 500;
 
-function countChanges(changes, newColour) {
-  for (const [, old] of changes) {
-    if (colourToTeam.has(old)) scores[colourToTeam.get(old)]--;
-    if (colourToTeam.has(newColour)) scores[colourToTeam.get(newColour)]++;
+// A short one-way hash of the player id goes into the public log, so undo survives a server restart
+// without revealing the secret id that the player uses to identify themselves.
+const playerKey = (id) => crypto.createHash('sha256').update(id).digest('hex').slice(0, 12);
+
+// changes = [[index, oldColour, newColour], ...]
+function countChanges(changes) {
+  for (const [, oldC, newC] of changes) {
+    if (colourToTeam.has(oldC)) scores[colourToTeam.get(oldC)]--;
+    if (colourToTeam.has(newC)) scores[colourToTeam.get(newC)]++;
   }
 }
+
+// Remember who made / undid an action so that "undo my last action" works.
+function track(entry, n) {
+  if (!entry.u) return;
+  const list = mine.get(entry.u) || [];
+  if (entry.tool === 'undo') { const k = list.indexOf(entry.ref); if (k >= 0) list.splice(k, 1); }
+  else list.push(n);
+  mine.set(entry.u, list);
+}
+const undoable = (key) => (mine.get(key) || []).length;
 
 function loadLog() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -38,10 +59,13 @@ function loadLog() {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line);
-      const res = R.applyAction(fb, e);          // same code path => identical canvas
+      const n = log.length;
+      const res = B.apply(board, e, n);          // same code path as live play => identical canvas
       if (res.error) continue;
-      countChanges(res.changes, e.c);
+      countChanges(res.changes);
+      e.n = n;
       log.push(e);
+      track(e, n);
     } catch (_) { /* skip a damaged line */ }
   }
   console.log(`Loaded ${log.length} actions from ${LOG_FILE}`);
@@ -49,7 +73,7 @@ function loadLog() {
 loadLog();
 let logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
 
-const gridString = () => Array.from(fb.data, v => v.toString(36)).join('');
+const gridString = () => Array.from(board.fb.data, v => v.toString(36)).join('');
 
 /* ---------------- HTTP (static files + small API) ---------------- */
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -71,7 +95,14 @@ const server = http.createServer((req, res) => {
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/') rel = '/index.html';
   const file = path.normalize(path.join(PUBLIC, rel));
-  if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end('forbidden'); }
+  const relativePath = path.relative(PUBLIC, file);
+  if (
+    relativePath.startsWith('..') ||
+    path.isAbsolute(relativePath)
+  ) {
+    res.writeHead(403);
+    return res.end('forbidden');
+  }
   fs.readFile(file, (err, buf) => {
     if (err) { res.writeHead(404); return res.end('not found'); }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
@@ -88,16 +119,18 @@ const onlineCount = () => { let n = 0; for (const c of wss.clients) if (c.player
 
 function sendInit(ws) {
   const wait = Math.max(0, (nextAllowed.get(ws.player.id) || 0) - Date.now());
-  send(ws, { t: 'init', size: SIZE, grid: gridString(), scores, online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length });
+  send(ws, { t: 'init', size: SIZE, grid: gridString(), scores, online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length, undo: undoable(playerKey(ws.player.id)) });
 }
 
 function resetBattle() {
   try { logStream.end(); fs.renameSync(LOG_FILE, path.join(DATA_DIR, `actions-${Date.now()}.ndjson`)); } catch (_) {}
   logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
-  fb = R.createFB(SIZE, SIZE, P.BG);
+  board = B.create(SIZE, SIZE, P.BG);
   log = [];
   scores = P.TEAMS.map(() => 0);
+  mine = new Map();
   nextAllowed.clear();
+  nextUndo.clear();
   for (const c of wss.clients) if (c.player) sendInit(c);
 }
 
@@ -132,22 +165,50 @@ wss.on('connection', (ws) => {
       const now = Date.now();
       const allowedAt = nextAllowed.get(ws.player.id) || 0;
       if (now < allowedAt) return send(ws, { t: 'rej', seq: m.seq, reason: 'Cooldown: wait a moment', wait: allowedAt - now });
-      const v = R.normalise(m, fb, P.NUM);
+      const v = R.normalise(m, board.fb, P.NUM);
       if (v.error) return send(ws, { t: 'rej', seq: m.seq, reason: v.error, wait: 0 });
       const a = v.action;
-      const res = R.applyAction(fb, a);
+      // Dry run: rasterize() only works out WHICH pixels would change (it writes nothing), so we can refuse first.
+      const dry = R.rasterize(board.fb, a);
+      if (dry.error) return send(ws, { t: 'rej', seq: m.seq, reason: dry.error, wait: 0 });
+      if (!dry.idx.some(i => board.fb.data[i] !== a.c)) return send(ws, { t: 'rej', seq: m.seq, reason: 'Nothing would change', wait: 0 });
+
+      const n = log.length, key = playerKey(ws.player.id);
+      const entry = { n, ts: now, p: ws.player.name, u: key, tm: ws.player.team, tool: a.tool, pts: a.pts, c: a.c, f: a.f };
+      const res = B.apply(board, entry, n);
       if (res.error) return send(ws, { t: 'rej', seq: m.seq, reason: res.error, wait: 0 });
-      if (res.changes.length === 0) return send(ws, { t: 'rej', seq: m.seq, reason: 'Nothing would change', wait: 0 });
 
       nextAllowed.set(ws.player.id, now + COOLDOWN_MS);
-      countChanges(res.changes, a.c);
-      const entry = { n: log.length, ts: now, p: ws.player.name, tm: ws.player.team, tool: a.tool, pts: a.pts, c: a.c, f: a.f };
-      log.push(entry);
+      countChanges(res.changes);
+      log.push(entry); track(entry, n);
       logStream.write(JSON.stringify(entry) + '\n');
 
-      broadcast({ t: 'px', n: entry.n, ts: now, p: entry.p, tm: entry.tm, tool: a.tool, c: a.c,
+      broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: a.tool, c: a.c,
                   idx: res.changes.map(ch => ch[0]), sc: scores });
-      send(ws, { t: 'ok', seq: m.seq, wait: COOLDOWN_MS, pixels: res.changes.length });
+      send(ws, { t: 'ok', seq: m.seq, wait: COOLDOWN_MS, pixels: res.changes.length, undo: undoable(key) });
+      return;
+    }
+
+    if (m.t === 'undo') {
+      const now = Date.now(), key = playerKey(ws.player.id);
+      if (now < (nextUndo.get(ws.player.id) || 0)) return send(ws, { t: 'rej', seq: m.seq, reason: 'Slow down a little', wait: 0 });
+      const list = mine.get(key) || [];
+      if (!list.length) return send(ws, { t: 'rej', seq: m.seq, reason: 'You have nothing to undo', wait: 0 });
+      nextUndo.set(ws.player.id, now + UNDO_GAP_MS);
+
+      const n = log.length;
+      const entry = { n, ts: now, p: ws.player.name, u: key, tm: ws.player.team, tool: 'undo', ref: list[list.length - 1] };
+      const res = B.apply(board, entry, n);
+      if (res.error) return send(ws, { t: 'rej', seq: m.seq, reason: res.error, wait: 0 });
+
+      countChanges(res.changes);
+      log.push(entry); track(entry, n);
+      logStream.write(JSON.stringify(entry) + '\n');
+
+      // every restored pixel can have a different colour, so send one colour per pixel
+      broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'undo',
+                  idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), sc: scores });
+      send(ws, { t: 'undone', seq: m.seq, pixels: res.changes.length, undo: undoable(key) });
     }
   });
 

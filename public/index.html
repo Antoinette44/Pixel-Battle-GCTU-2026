@@ -8,8 +8,6 @@
 </head>
 <body>
 
-<body>
-
 <!-- Intro flow: welcome -> how to play + rules -> pick team -> "you are on X team" -> Start -->
 <div id="join" class="overlay">
   <div class="card wiz">
@@ -71,15 +69,6 @@
 
 <header>
   <div class="brand">Pixel Battle</div>
-  <div class="hstat">
-    <span id="dot" class="dot off"></span>
-    <span id="statusTxt">connecting</span>
-  </div>
-
-  <!-- Keep the rest of your original HTML -->
-
-<header>
-  <div class="brand">Pixel Battle</div>
   <div class="hstat"><span id="dot" class="dot off"></span><span id="statusTxt">connecting</span></div>
   <div class="hstat">Players: <b id="online">0</b></div>
   <div class="hstat">Actions: <b id="actions">0</b></div>
@@ -89,19 +78,26 @@
 <section id="score" aria-label="Team scoreboard"></section>
 
 <main>
-  <div id="stage">
-    <div id="world">
-      <canvas id="base" width="128" height="128"></canvas>
-      <canvas id="prev" width="128" height="128"></canvas>
-      <div id="grid" aria-hidden="true"></div>
-      <div id="hover"></div>
-      <div id="marks"></div>
+  <div id="viewcol">
+    <!-- dedicated viewport: fixed size, overflow hidden - zooming/panning only moves the board inside it -->
+    <div id="stage">
+      <div id="world">
+        <canvas id="base" width="128" height="128"></canvas>
+        <canvas id="prev" width="128" height="128"></canvas>
+        <div id="grid" aria-hidden="true"></div>
+        <div id="hover"></div>
+        <div id="marks"></div>
+      </div>
     </div>
+    <!-- zoom bar sits UNDER the viewport so it never covers board pixels -->
     <div id="hud">
       <span id="coords">x - y -</span>
-      <button id="zin" title="Zoom in">+</button>
-      <button id="zout" title="Zoom out">&minus;</button>
-      <button id="zfit" title="Fit to screen">Fit</button>
+      <span class="zctl">
+        <span id="zpct" title="Zoom (100% = fits the screen)">100%</span>
+        <button id="zin" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+        <button id="zout" type="button" title="Zoom out" aria-label="Zoom out">&minus;</button>
+        <button id="zfit" type="button" title="Fit to screen" aria-label="Fit board to screen">Fit</button>
+      </span>
     </div>
   </div>
 
@@ -122,6 +118,7 @@
     <div id="swatchInfo" class="info"></div>
 
     <div class="row actions">
+      <button id="undoAction" disabled title="Undo my last action (Ctrl+Z)">Undo</button>
       <button id="undoPt" class="hidden">Undo point</button>
       <button id="cancel">Cancel</button>
       <button id="place" class="primary" disabled>Place</button>
@@ -169,6 +166,7 @@
 
 <script src="palette.js"></script>
 <script src="raster.js"></script>
+<script src="board.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

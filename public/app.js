@@ -16,6 +16,7 @@
   let fb = Raster.createFB(SIZE, SIZE, BG);
   let tool = 'pen', pts = [], colour = 16, myTeam = +store.get('pb_team', 0) || 0;
   let readyAt = 0, cooldownMs = 5000, connected = false, seq = 0, ws = null, retry = 500, scores = TEAMS.map(() => 0);
+  let undoLeft = 0;                       // how many of MY drawings can still be undone (server tells us)
   let pid = store.get('pb_id', '');
   if (!/^[\w-]{8,64}$/.test(pid)) {
     pid = Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
@@ -46,40 +47,74 @@
     fitView();
   }
 
-  /* ---------------- viewport: zoom + pan ---------------- */
+  /* ---------------- viewport: zoom + pan ----------------
+     #stage is the fixed-size viewport (overflow:hidden, so zooming never changes the page layout).
+     #world is always SIZE x SIZE CSS px and is only ever moved/scaled with ONE uniform transform,
+     so the board stays perfectly square and the SIZE x SIZE pixel data is never touched by zoom. */
   const stage = $('stage'), world = $('world');
+  const MAX_Z = 48;                         // largest zoom: 1 board pixel = 48 screen px
+  const PAN_SLACK = 40;                     // how far (px) a zoomed board may be dragged past the viewport edge
   let z = 4, tx = 0, ty = 0;
+  let fitZ = 4, minZ = 1;                   // zoom that fits the whole board / smallest allowed zoom
+  let fitted = true;                        // true while the user has not zoomed away from "Fit"
+  const viewSize = () => ({ w: stage.clientWidth, h: stage.clientHeight });
+
+  function computeFit() {
+    const { w, h } = viewSize();
+    fitZ = Math.max(0.1, Math.min(w, h) / SIZE * 0.96);      // whole board visible, 2% margin each side
+    minZ = Math.min(fitZ, Math.max(0.5, fitZ * 0.5));        // zoom out to half of Fit (never below 0.5)
+  }
+  // Keep the board centred when it is smaller than the viewport; when it is larger, stop it being dragged away.
+  function clampView() {
+    const { w, h } = viewSize(), bw = SIZE * z;
+    tx = bw <= w ? (w - bw) / 2 : Math.min(PAN_SLACK, Math.max(w - bw - PAN_SLACK, tx));
+    ty = bw <= h ? (h - bw) / 2 : Math.min(PAN_SLACK, Math.max(h - bw - PAN_SLACK, ty));
+  }
   const applyView = () => {
+    clampView();
     world.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
     const grid = $('grid');
     grid.style.setProperty('--grid-line-width', `${Math.min(0.075, 0.5 / z)}px`);
     grid.style.opacity = Math.min(0.35, 0.12 + Math.max(0, z - 1) * 0.012);
-    $('zfit').title = 'zoom ' + z.toFixed(1) + 'x';
+    $('zpct').textContent = Math.round(z / fitZ * 100) + '%';           // 100% = "Fit"
+    $('zpct').title = '1 board pixel = ' + z.toFixed(2) + ' screen px';
+    $('zin').disabled = z >= MAX_Z - 1e-6;
+    $('zout').disabled = z <= minZ + 1e-6;
   };
   function fitView() {
-    const r = stage.getBoundingClientRect();
-    z = Math.max(1, Math.min(r.width, r.height) / SIZE * 0.96);
-    tx = (r.width - SIZE * z) / 2; ty = (r.height - SIZE * z) / 2;
-    applyView();
+    computeFit();
+    z = fitZ; tx = 0; ty = 0; fitted = true;
+    applyView();                                                         // clampView() centres it
   }
   function zoomAt(cx, cy, factor) {
-    const nz = Math.min(48, Math.max(1, z * factor));
+    const nz = Math.min(MAX_Z, Math.max(minZ, z * factor));
+    if (nz === z) return;
     const k = nz / z;
-    tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k; z = nz;
+    tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k; z = nz;            // keep the point under (cx, cy) fixed
+    fitted = Math.abs(z - fitZ) < 1e-6;
     applyView();
   }
+  // Screen position -> board pixel. Uses the board's REAL on-screen rectangle (after zoom + pan)
+  // and its logical size, so it is correct at every zoom level, for mouse and touch alike.
   function toPixel(clientX, clientY) {
-    const r = stage.getBoundingClientRect();
-    return [Math.floor((clientX - r.left - tx) / z), Math.floor((clientY - r.top - ty) / z)];
+    const r = world.getBoundingClientRect();
+    return [Math.floor((clientX - r.left) / r.width * SIZE), Math.floor((clientY - r.top) / r.height * SIZE)];
   }
-  $('zin').onclick = () => { const r = stage.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1.5); };
-  $('zout').onclick = () => { const r = stage.getBoundingClientRect(); zoomAt(r.width / 2, r.height / 2, 1 / 1.5); };
+  const zoomCentre = (factor) => { const { w, h } = viewSize(); zoomAt(w / 2, h / 2, factor); };
+  $('zin').onclick = () => zoomCentre(1.5);
+  $('zout').onclick = () => zoomCentre(1 / 1.5);
   $('zfit').onclick = fitView;
-  window.addEventListener('resize', fitView);
+  function onViewportResize() {
+    computeFit();
+    if (fitted) fitView();
+    else { z = Math.min(MAX_Z, Math.max(minZ, z)); applyView(); }
+  }
+  if (window.ResizeObserver) new ResizeObserver(onViewportResize).observe(stage);
+  else window.addEventListener('resize', onViewportResize);
   stage.addEventListener('wheel', (e) => {
     e.preventDefault();
     const r = stage.getBoundingClientRect();
-    zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0015));
+    zoomAt(e.clientX - r.left - stage.clientLeft, e.clientY - r.top - stage.clientTop, Math.exp(-e.deltaY * 0.0015));
   }, { passive: false });
 
   // one finger: tap = place a point, drag = pan.  two fingers: pinch zoom + pan.
@@ -88,7 +123,7 @@
   const pinchInfo = () => {
     const [a, b] = [...ptrs.values()];
     const r = stage.getBoundingClientRect();
-    return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2 - r.left, my: (a.y + b.y) / 2 - r.top };
+    return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2 - r.left - stage.clientLeft, my: (a.y + b.y) / 2 - r.top - stage.clientTop };
   };
   stage.addEventListener('pointerdown', (e) => {
     stage.setPointerCapture(e.pointerId);
@@ -101,7 +136,7 @@
     if (!p) { hoverAt(e.clientX, e.clientY); return; }
     if (ptrs.size === 1) {
       if (!moved && Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 6) moved = true;
-      if (moved) { tx += e.clientX - p.x; ty += e.clientY - p.y; applyView(); }
+      if (moved) { stage.classList.add('panning'); tx += e.clientX - p.x; ty += e.clientY - p.y; applyView(); }
       p.x = e.clientX; p.y = e.clientY;
     } else if (ptrs.size === 2) {
       p.x = e.clientX; p.y = e.clientY;
@@ -116,6 +151,7 @@
     if (!p) return;
     const wasTap = ptrs.size === 1 && !moved && e.type === 'pointerup';
     ptrs.delete(e.pointerId);
+    if (!ptrs.size) stage.classList.remove('panning');
     if (ptrs.size === 1) { moved = true; const q = [...ptrs.values()][0]; q.sx = q.x; q.sy = q.y; }
     if (wasTap) tap(...toPixel(e.clientX, e.clientY));
   };
@@ -205,10 +241,18 @@
 
   function setMsg(t, good) { $('msg').textContent = t; $('msg').className = 'msg' + (good ? ' good' : ''); }
   const cooling = () => Date.now() < readyAt;
-  function refreshButtons() { $('place').disabled = !(previewOK && connected && !cooling()); }
+  function refreshButtons() {
+    $('place').disabled = !(previewOK && connected && !cooling());
+    $('undoAction').disabled = !(connected && undoLeft > 0);
+    $('undoAction').textContent = undoLeft > 0 ? `Undo (${undoLeft})` : 'Undo';
+  }
 
   $('cancel').onclick = () => { pts = []; updatePreview(); };
   $('undoPt').onclick = () => { pts.pop(); updatePreview(); };
+  $('undoAction').onclick = () => {
+    if (!connected || undoLeft < 1) return;
+    seq++; ws.send(JSON.stringify({ t: 'undo', seq }));
+  };
   $('filled').onchange = updatePreview;
   $('place').onclick = place;
   function place() {
@@ -224,6 +268,7 @@
     if (e.key >= '1' && e.key <= '5') selectTool(TOOLS[+e.key - 1].id);
     else if (e.key === 'Enter') place();
     else if (e.key === 'Escape') $('cancel').onclick();
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); $('undoAction').onclick(); }
   });
 
   /* ---------------- palette ---------------- */
@@ -299,10 +344,10 @@
         for (let i = 0; i < m.grid.length; i++) fb.data[i] = parseInt(m.grid[i], 36);
         renderAll(); scores = m.scores; renderScores();
         cooldownMs = m.cooldown; readyAt = Date.now() + m.wait;
-        $('online').textContent = m.online; $('actions').textContent = m.actions;
+        $('online').textContent = m.online; $('actions').textContent = m.actions; undoLeft = m.undo || 0;
         setStatus(true, 'live'); updatePreview();
       } else if (m.t === 'px') {
-        for (const i of m.idx) { Raster.setPixel(fb, i % SIZE, (i / SIZE) | 0, m.c); paintIndex(i, m.c); }
+        m.idx.forEach((i, k) => { const col = m.cols ? m.cols[k] : m.c; Raster.setPixel(fb, i % SIZE, (i / SIZE) | 0, col); paintIndex(i, col); });
         baseCtx.putImageData(baseImg, 0, 0);
         scores = m.sc; renderScores();
         $('actions').textContent = m.n + 1;
@@ -311,7 +356,9 @@
         $('online').textContent = m.n;
       } else if (m.t === 'ok') {
         readyAt = Date.now() + m.wait; cooldownMs = m.wait;
-        pts = []; updatePreview(); setMsg('Placed ' + m.pixels + ' pixels', true);
+        undoLeft = m.undo || 0; pts = []; updatePreview(); setMsg('Placed ' + m.pixels + ' pixels', true);
+      } else if (m.t === 'undone') {
+        undoLeft = m.undo || 0; refreshButtons(); setMsg('Undone: ' + m.pixels + ' pixel' + (m.pixels === 1 ? '' : 's') + ' restored', true);
       } else if (m.t === 'rej') {
         if (m.wait) readyAt = Date.now() + m.wait;
         toast(m.reason); setMsg(m.reason); refreshButtons();
@@ -342,11 +389,11 @@
   /* ---------------- time-lapse replay ---------------- */
   const rpView = $('rpView'), rpCtx = rpView.getContext('2d');
   const rpOff = document.createElement('canvas'), rpOffCtx = rpOff.getContext('2d');
-  const rp = { log: [], fb: null, img: null, n: 0, playing: false, ap: 0, last: 0, rec: null };
+  const rp = { log: [], board: null, img: null, n: 0, playing: false, ap: 0, last: 0, rec: null };
 
   function rpReset() {
     rpOff.width = SIZE; rpOff.height = SIZE;
-    rp.fb = Raster.createFB(SIZE, SIZE, BG);
+    rp.board = Board.create(SIZE, SIZE, BG);      // same code as the server => same picture
     rp.img = rpOffCtx.createImageData(SIZE, SIZE);
     for (let i = 0; i < SIZE * SIZE; i++) plotRGBA(rp.img, i % SIZE, (i / SIZE) | 0, COLOURS[BG].rgb, 255);
     rp.n = 0;
@@ -354,8 +401,8 @@
   function rpAdvance(target) {
     while (rp.n < target) {
       const e = rp.log[rp.n];
-      const res = Raster.applyAction(rp.fb, e);
-      if (!res.error) for (const [i] of res.changes) plotRGBA(rp.img, i % SIZE, (i / SIZE) | 0, COLOURS[e.c].rgb, 255);
+      const res = Board.apply(rp.board, e, rp.n);   // handles drawings AND undo entries
+      if (!res.error) for (const [i, , col] of res.changes) plotRGBA(rp.img, i % SIZE, (i / SIZE) | 0, COLOURS[col].rgb, 255);
       rp.n++;
     }
   }
@@ -367,7 +414,7 @@
     $('rpSeek').value = rp.n;
     if (rp.n === 0) { $('rpInfo').textContent = `0 / ${N} actions`; return; }
     const e = rp.log[rp.n - 1], t0 = rp.log[0].ts, s = Math.round((e.ts - t0) / 1000);
-    $('rpInfo').textContent = `${rp.n} / ${N} actions  |  battle time ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}  |  ${e.p} (${TEAMS[e.tm].name}) used ${e.tool}`;
+    $('rpInfo').textContent = `${rp.n} / ${N} actions  |  battle time ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}  |  ${e.p} (${TEAMS[e.tm].name}) ${e.tool === 'undo' ? 'undid an action' : 'used ' + e.tool}`;
   }
   function rpSeekTo(n) { if (n < rp.n) rpReset(); rpAdvance(n); rpDraw(); }
   function rpRate() {

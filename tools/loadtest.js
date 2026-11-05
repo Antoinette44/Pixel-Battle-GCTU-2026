@@ -10,7 +10,7 @@ const N = +process.argv[2] || 20, SECONDS = +process.argv[3] || 30;
 const URL_ = process.env.URL || 'ws://localhost:3000';
 const rnd = (n) => Math.floor(Math.random() * n);
 const lat = [], rtt = [];
-let sent = 0, ok = 0, rej = 0, stop = false;
+let sent = 0, ok = 0, rej = 0, undos = 0, stop = false;
 
 function bot(i) {
   return new Promise((resolve) => {
@@ -19,6 +19,7 @@ function bot(i) {
     const fb = R.createFB(128, 128, 0); b.fb = fb;
     const act = () => {
       if (stop || ws.readyState !== 1) return;
+      if (b.canUndo && rnd(5) === 0) { sent++; ws.send(JSON.stringify({ t: 'undo', seq: sent })); return; }   // ~20% of turns: undo
       const t = ['pen', 'line', 'circle', 'polygon', 'fill'][rnd(5)];
       const x = 8 + rnd(110), y = 8 + rnd(110), c = rnd(P.NUM);
       const near = () => [Math.max(0, Math.min(127, x + rnd(21) - 10)), Math.max(0, Math.min(127, y + rnd(21) - 10))];
@@ -30,8 +31,9 @@ function bot(i) {
     ws.on('message', (d) => {
       const m = JSON.parse(d);
       if (m.t === 'init') { for (let k = 0; k < m.grid.length; k++) fb.data[k] = parseInt(m.grid[k], 36); setTimeout(act, rnd(2000)); resolve(b); }
-      else if (m.t === 'px') { lat.push(Date.now() - m.ts); for (const k of m.idx) R.setPixel(fb, k % 128, (k / 128) | 0, m.c); }
-      else if (m.t === 'ok') { ok++; rtt.push(Date.now() - b.t0); setTimeout(act, m.wait + 20 + rnd(300)); }
+      else if (m.t === 'px') { lat.push(Date.now() - m.ts); m.idx.forEach((k, j) => R.setPixel(fb, k % 128, (k / 128) | 0, m.cols ? m.cols[j] : m.c)); }
+      else if (m.t === 'undone') { undos++; setTimeout(act, 100 + rnd(300)); }
+      else if (m.t === 'ok') { ok++; b.canUndo = true; rtt.push(Date.now() - b.t0); setTimeout(act, m.wait + 20 + rnd(300)); }
       else if (m.t === 'rej') { rej++; setTimeout(act, (m.wait || 0) + 50 + rnd(300)); }
     });
     ws.on('error', (e) => { console.error('bot', i, e.message); resolve(b); });
@@ -50,7 +52,7 @@ const sum = (fb) => { let h = 0; for (let k = 0; k < fb.data.length; k++) h = (h
   const ref = sum(late.fb);
   const bad = bots.filter(b => sum(b.fb) !== ref).length;
   console.log('\n=== Load test result ===');
-  console.log(`players: ${N}   actions sent: ${sent}   accepted: ${ok}   rejected: ${rej}`);
+  console.log(`players: ${N}   actions sent: ${sent}   accepted: ${ok}   undone: ${undos}   rejected: ${rej}`);
   console.log(`broadcast latency ms  p50: ${pct(lat, .5)}  p95: ${pct(lat, .95)}  max: ${Math.max(0, ...lat)}   (target: < 1000)`);
   console.log(`action round-trip ms  p50: ${pct(rtt, .5)}  p95: ${pct(rtt, .95)}`);
   console.log(`canvases identical to a late joiner's snapshot: ${N - bad}/${N}`);

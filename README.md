@@ -9,7 +9,10 @@ joins one of four teams and paints on a shared **128 x 128** canvas. All shapes 
 ```bash
 npm install          # installs the only dependency: ws
 npm start            # http://localhost:3000   (also prints the Wi-Fi address, e.g. http://192.168.1.20:3000)
-npm test             # unit tests that reproduce the Week 2 worked examples
+npm test             # unit tests: Week 2 worked examples + undo (public/board.js)
+npm run test:server  # end-to-end test: starts the real server and real websocket clients
+npm run test:browser # real Chromium test (needs: pip install playwright && playwright install chromium)
+npm run demo         # starts the server with a saved battle loaded, to show the replay any time
 ```
 
 Phones on the same Wi-Fi open the "on the Wi-Fi" address printed in the terminal.
@@ -29,7 +32,15 @@ Options (environment variables): `PORT`, `COOLDOWN_MS` (default 5000), `CANVAS_S
 | 5 | Cooldown + live team scoreboard | Cooldown is enforced on the **server** per player id (5 s). The scoreboard counts pixels of each team colour, updated on every change. |
 | 6 | Time-lapse replay from a stored action log | Every action is appended to `data/actions.ndjson`. The Replay section loads `/api/log` and re-runs the same rasterizers; speed control, scrubber, video recording. |
 | 7 | Touch + laptop, 15+ players tested | Pointer events: tap = place point, drag = pan, pinch / wheel = zoom. `tools/loadtest.js` simulates N players. |
-| + | Stretch | Zoom/pan viewport, export PNG, replay recorded as .webm video. (Undo is not implemented.) |
+| + | Stretch | Zoom/pan viewport, export PNG, replay recorded as .webm video, **undo your own actions** (button or Ctrl+Z). |
+
+### How undo works (public/board.js)
+* The board remembers, for every pixel, **which action painted it last** and what was there before.
+* "Undo" removes your last drawing that is still active. A pixel only goes back if it is **still yours**: if another player painted over it
+  afterwards, their pixel stays (fair play). Undoing is not allowed twice, and has a 0.5 s anti-spam gap. It does **not** refund the cooldown.
+* An undo is written to the action log as `{tool:'undo', ref:n}`, and the replay uses the same `board.js`, so the time-lapse always equals the live canvas
+  (checked by a randomized test and by the browser test, which compares every pixel).
+* The log stores a short one-way hash of the player id (`u`), never the secret id, so undo still works after a server restart.
 
 ### Design decisions you should be able to explain
 * **The server is the authority.** Clients send an *action* (`tool + points + colour`), not pixels. The server runs the same
@@ -47,15 +58,16 @@ COOLDOWN_MS=1000 DATA_DIR=./data-test PORT=3111 npm start        # terminal 1
 URL=ws://localhost:3111 npm run loadtest -- 25 30                # terminal 2: 25 bots for 30 s
 ```
 It reports broadcast latency (p50/p95/max) and checks that every bot's canvas equals the snapshot a brand-new player receives.
-Our run (25 bots, 15 s, same machine): p95 latency 3 ms, 25/25 canvases identical.
+Our run (25 bots, 20 s, same machine, ~20% of turns are undo): p95 latency 3 ms, 25/25 canvases identical.
 **Repeat it on the real class Wi-Fi with real phones and put your own numbers in the report.**
 
 ## Deploy for the online class activity (free)
 
 1. Push this repo to GitHub.
-2. Render.com -> New -> Web Service -> connect the repo. Build: `npm install`, Start: `npm start`.
+2. Render.com -> New -> Blueprint -> pick the repo (`render.yaml` is included), or New -> Web Service with Build `npm install`, Start `npm start`.
 3. Share the `https://....onrender.com` link (WebSockets work over `wss://` automatically).
 Free hosts sleep when idle (open the link a minute before class) and may erase `data/` on restart.
+**Keep the real battle:** `URL=https://<your-app>.onrender.com npm run backup-log` saves the log to `samples/`; commit it to Git.
 
 ## Files
 
@@ -65,8 +77,12 @@ public/index.html    game page          public/style.css   responsive styles
 public/app.js        client: viewport, tools, palette, network, replay
 public/raster.js     OUR rasterizers (shared by browser + server)
 public/palette.js    HSB palette (shared)
+public/board.js      frame buffer + pixel owners + undo (shared by server, replay, tests)
 public/lab.html      Algorithm lab: step tables for DDA / Bresenham / midpoint (use in your presentation)
-tests/raster.test.js unit tests         tools/loadtest.js   load test
+tests/*.test.js      unit + server tests   tests/browser_test.py  real-browser test
+tools/loadtest.js    load test             tools/backup-log.js, demo.js, make-demo-log.js   keep / replay a battle
+samples/             saved battle logs (sample-small = test players, demo-battle = SYNTHETIC demo, add your real one)
+render.yaml          free deploy on Render     docs/  GIT_PLAN, TEST_SHEET, REPORT_DRAFT, DIARY, screenshots/
 docs/DELIVERABLES.md templates: report outline, build diary, contribution table, AI declaration, video script
 ```
 

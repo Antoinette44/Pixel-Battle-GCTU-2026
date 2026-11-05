@@ -1,0 +1,14 @@
+# One-click deploy on Render.com: New + > Blueprint > pick this repo.
+# Free web services sleep when idle (open the link a minute before class) and the disk is wiped on restart,
+# so run `URL=https://<your-app>.onrender.com npm run backup-log` BEFORE the service sleeps to keep the battle.
+services:
+  - type: web
+    name: pixel-battle
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: ADMIN_KEY
+        generateValue: true

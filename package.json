@@ -5,10 +5,19 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/raster.test.js",
-    "loadtest": "node tools/loadtest.js"
+    "test": "node tests/raster.test.js && node tests/board.test.js",
+    "loadtest": "node tools/loadtest.js",
+    "test:server": "node tests/server.test.js",
+    "demo": "node tools/demo.js",
+    "backup-log": "node tools/backup-log.js",
+    "make-demo-log": "node tools/make-demo-log.js",
+    "test:browser": "python3 tests/browser_test.py"
   },
-  "engines": { "node": ">=18" },
-  "dependencies": { "ws": "^8.18.0" },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
   "license": "MIT"
 }
