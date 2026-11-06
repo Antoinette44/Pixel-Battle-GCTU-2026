@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Pixel Battle - GCTU Tech Club</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -72,6 +75,7 @@
   <div class="hstat"><span id="dot" class="dot off"></span><span id="statusTxt">connecting</span></div>
   <div class="hstat">Players: <b id="online">0</b></div>
   <div class="hstat">Actions: <b id="actions">0</b></div>
+  <button id="helpBtn" type="button" aria-label="Restart the tutorial">Help / Tutorial</button>
   <nav><a href="lab.html" target="_blank">Algorithm lab</a></nav>
 </header>
 
@@ -102,7 +106,7 @@
   </div>
 
   <aside id="panel">
-    <div class="row cd">
+    <div class="row cd" id="cooldown">
       <div id="cdbar"><div id="cdfill"></div></div>
       <span id="cdtxt">Ready</span>
     </div>
@@ -163,6 +167,21 @@
 </section>
 
 <div id="toast"></div>
+
+<div id="tourShade" class="tour-shade hidden" aria-hidden="true"></div>
+<section id="tourCard" class="tour-card hidden" role="dialog" aria-modal="true" aria-labelledby="tourTitle" aria-describedby="tourText">
+  <div class="tour-count" id="tourCount"></div>
+  <h2 id="tourTitle">Welcome to Pixel Battle</h2>
+  <p id="tourText"></p>
+  <div class="tour-controls">
+    <button id="tourSkip" type="button">Skip</button>
+    <span class="tour-nav">
+      <button id="tourBack" type="button">Back</button>
+      <button id="tourNext" class="primary" type="button">Next</button>
+      <button id="tourFinish" class="primary hidden" type="button">Finish</button>
+    </span>
+  </div>
+</section>
 
 <script src="palette.js"></script>
 <script src="raster.js"></script>

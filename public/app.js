@@ -6,15 +6,26 @@
   'use strict';
   const { COLOURS, TEAMS, NUM, BG } = Palette;
   const $ = (id) => document.getElementById(id);
+  const ICONS = {
+    pen: '<path d="m16 4 4 4"/><path d="M4 20l4-.8L19 8a2.8 2.8 0 0 0-4-4L4 15z"/>',
+    line: '<path d="M5 19 19 5"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/>',
+    circle: '<circle cx="12" cy="12" r="8"/>',
+    polygon: '<path d="m12 3 8 5-2 10-11 2-3-10z"/>',
+    fill: '<path d="m4 15 8-8 8 8"/><path d="M6 17h12l-2 4H8z"/><path d="m12 3 2 2"/>',
+  };
+  const icon = (name) => `<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
   const store = {
     get: (k, d) => { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } },
     set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} },
   };
+  const storedTeam = store.get('pb_team', null);
+  const parsedTeam = storedTeam === null ? NaN : Number(storedTeam);
+  const hasSavedTeam = Number.isInteger(parsedTeam) && parsedTeam >= 0 && parsedTeam < TEAMS.length;
 
   /* ---------------- state ---------------- */
   let SIZE = 128;
   let fb = Raster.createFB(SIZE, SIZE, BG);
-  let tool = 'pen', pts = [], colour = 16, myTeam = +store.get('pb_team', 0) || 0;
+  let tool = 'pen', pts = [], colour = 16, myTeam = hasSavedTeam ? parsedTeam : 0;
   let readyAt = 0, cooldownMs = 5000, connected = false, seq = 0, ws = null, retry = 500, scores = TEAMS.map(() => 0);
   let undoLeft = 0;                       // how many of MY drawings can still be undone (server tells us)
   let pid = store.get('pb_id', '');
@@ -75,7 +86,7 @@
     world.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
     const grid = $('grid');
     grid.style.setProperty('--grid-line-width', `${Math.min(0.075, 0.5 / z)}px`);
-    grid.style.opacity = Math.min(0.35, 0.12 + Math.max(0, z - 1) * 0.012);
+    grid.style.opacity = Math.min(0.22, 0.035 + Math.max(0, z - 6) * 0.0045);
     $('zpct').textContent = Math.round(z / fitZ * 100) + '%';           // 100% = "Fit"
     $('zpct').title = '1 board pixel = ' + z.toFixed(2) + ' screen px';
     $('zin').disabled = z >= MAX_Z - 1e-6;
@@ -117,7 +128,7 @@
     zoomAt(e.clientX - r.left - stage.clientLeft, e.clientY - r.top - stage.clientTop, Math.exp(-e.deltaY * 0.0015));
   }, { passive: false });
 
-  // one finger: tap = place a point, drag = pan.  two fingers: pinch zoom + pan.
+  // Pen drags make a connected stroke; other one-finger drags pan. Two fingers pinch and pan.
   const ptrs = new Map();
   let moved = false, pinchLast = null;
   const pinchInfo = () => {
@@ -127,14 +138,27 @@
   };
   stage.addEventListener('pointerdown', (e) => {
     stage.setPointerCapture(e.pointerId);
-    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY });
+    const [x, y] = toPixel(e.clientX, e.clientY);
+    const drawing = tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, drawing, points: drawing ? [[x, y]] : [] });
     if (ptrs.size === 1) moved = false;
-    else { moved = true; pinchLast = pinchInfo(); }
+    else {
+      for (const p of ptrs.values()) p.drawing = false;
+      if (tool === 'pen') { pts = []; updatePreview(); }
+      moved = true; pinchLast = pinchInfo();
+    }
   });
   stage.addEventListener('pointermove', (e) => {
     const p = ptrs.get(e.pointerId);
     if (!p) { hoverAt(e.clientX, e.clientY); return; }
     if (ptrs.size === 1) {
+      if (p.drawing) {
+        const [x, y] = toPixel(e.clientX, e.clientY);
+        const last = p.points[p.points.length - 1];
+        if (Raster.inBounds(fb, x, y) && (x !== last[0] || y !== last[1])) p.points.push([x, y]);
+        p.x = e.clientX; p.y = e.clientY;
+        return;
+      }
       if (!moved && Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 6) moved = true;
       if (moved) { stage.classList.add('panning'); tx += e.clientX - p.x; ty += e.clientY - p.y; applyView(); }
       p.x = e.clientX; p.y = e.clientY;
@@ -149,7 +173,15 @@
   const endPtr = (e) => {
     const p = ptrs.get(e.pointerId);
     if (!p) return;
-    const wasTap = ptrs.size === 1 && !moved && e.type === 'pointerup';
+    const penStroke = p.drawing && e.type === 'pointerup';
+    const wasTap = !p.drawing && ptrs.size === 1 && !moved && e.type === 'pointerup';
+    if (penStroke) {
+      const [x, y] = toPixel(e.clientX, e.clientY);
+      const last = p.points[p.points.length - 1];
+      if (Raster.inBounds(fb, x, y) && (x !== last[0] || y !== last[1])) p.points.push([x, y]);
+      pts = p.points;
+      updatePreview();
+    }
     ptrs.delete(e.pointerId);
     if (!ptrs.size) stage.classList.remove('panning');
     if (ptrs.size === 1) { moved = true; const q = [...ptrs.values()][0]; q.sx = q.x; q.sy = q.y; }
@@ -171,7 +203,7 @@
 
   /* ---------------- tools ---------------- */
   const TOOLS = [
-    { id: 'pen',     label: 'Pen',     need: 1, hint: 'Tap one pixel.' },
+    { id: 'pen',     label: 'Pen',     need: 1, hint: 'Tap for one pixel or drag to draw a connected stroke.' },
     { id: 'line',    label: 'Line',    need: 2, hint: 'Tap the start, then the end (Bresenham).' },
     { id: 'circle',  label: 'Circle',  need: 2, hint: 'Tap the centre, then a point on the rim (midpoint circle).' },
     { id: 'polygon', label: 'Polygon', need: 3, hint: 'Tap 3 to 8 corners (scan-line fill).' },
@@ -182,7 +214,8 @@
     $('tools').innerHTML = '';
     TOOLS.forEach((t, k) => {
       const b = document.createElement('button');
-      b.textContent = t.label; b.title = `${t.label} (key ${k + 1})`;
+      b.innerHTML = `${icon(t.id)}<span>${t.label}</span>`;
+      b.title = `${t.label} (key ${k + 1})`; b.setAttribute('aria-label', t.label);
       b.onclick = () => selectTool(t.id);
       b.dataset.id = t.id;
       $('tools').appendChild(b);
@@ -242,6 +275,10 @@
   function setMsg(t, good) { $('msg').textContent = t; $('msg').className = 'msg' + (good ? ' good' : ''); }
   const cooling = () => Date.now() < readyAt;
   function refreshButtons() {
+    const unavailable = !connected || cooling();
+    for (const b of $('tools').children) b.disabled = unavailable;
+    for (const b of $('palette').children) b.disabled = unavailable;
+    $('panel').classList.toggle('cooling', cooling());
     $('place').disabled = !(previewOK && connected && !cooling());
     $('undoAction').disabled = !(connected && undoLeft > 0);
     $('undoAction').textContent = undoLeft > 0 ? `Undo (${undoLeft})` : 'Undo';
@@ -320,9 +357,9 @@
   setInterval(() => {
     const rem = readyAt - Date.now();
     if (rem > 0) {
-      $('cdfill').style.width = (100 * (1 - rem / cooldownMs)) + '%'; $('cdfill').style.background = '#e8a33c';
+      $('cdfill').style.width = (100 * (1 - rem / cooldownMs)) + '%'; $('cdfill').style.background = '#003366';
       $('cdtxt').textContent = (rem / 1000).toFixed(1) + ' s';
-    } else { $('cdfill').style.width = '100%'; $('cdfill').style.background = '#3c3'; $('cdtxt').textContent = 'Ready'; }
+    } else { $('cdfill').style.width = '100%'; $('cdfill').style.background = '#01F9C6'; $('cdtxt').textContent = 'Ready'; }
     refreshButtons();
   }, 100);
 
@@ -345,7 +382,7 @@
         renderAll(); scores = m.scores; renderScores();
         cooldownMs = m.cooldown; readyAt = Date.now() + m.wait;
         $('online').textContent = m.online; $('actions').textContent = m.actions; undoLeft = m.undo || 0;
-        setStatus(true, 'live'); updatePreview();
+        setStatus(true, 'live'); updatePreview(); maybeStartTour();
       } else if (m.t === 'px') {
         m.idx.forEach((i, k) => { const col = m.cols ? m.cols[k] : m.c; Raster.setPixel(fb, i % SIZE, (i / SIZE) | 0, col); paintIndex(i, col); });
         baseCtx.putImageData(baseImg, 0, 0);
@@ -470,7 +507,7 @@
 
   /* ---------------- intro flow: welcome > rules > team > confirm > start ---------------- */
   const TEAM_WORD = ['Red', 'Blue', 'Green', 'Gold'];
-  let teamPicked = store.get('pb_team', null) !== null;   // returning players keep their team
+  let teamPicked = hasSavedTeam;   // returning players keep their team
   function showStep(n) {
     document.querySelectorAll('#join .step').forEach((s) => s.classList.toggle('on', +s.dataset.step === n));
     document.querySelectorAll('#wizDots i').forEach((d, i) => d.classList.toggle('on', i <= n));
@@ -516,6 +553,75 @@
     fitView(); connect();
     toast(`You are on the ${TEAM_WORD[myTeam]} team. Good luck!`);
   };
+
+  /* ---------------- first-time onboarding ---------------- */
+  const TOUR_STEPS = [
+    { target: '#stage', title: 'Shared drawing canvas', text: 'This is the shared canvas. Every pixel you place appears here for all players.' },
+    { target: '#tools', title: 'Drawing tools', text: 'Choose Pen, Line, Circle, Polygon or Paint Bucket. The pen also supports connected drag strokes.' },
+    { target: '#palette', title: '16-color palette', text: 'Select a color here. Its HSB, RGB and HEX values are shown just below the palette.' },
+    { target: '#cooldown', title: 'Five-second cooldown', text: 'Each drawing action starts a five-second countdown. The bar and disabled controls show when you can draw again.' },
+    { target: '#score', title: 'Live team scoreboard', text: 'Each score counts the pixels currently owned by that team color, including replacements.' },
+  ];
+  let tourStep = 0, tourTarget = null, autoTourOpened = false;
+  function positionTour() {
+    if (!tourTarget || $('tourCard').classList.contains('hidden')) return;
+    const r = tourTarget.getBoundingClientRect(), card = $('tourCard');
+    const margin = 12, width = card.offsetWidth, height = card.offsetHeight;
+    const left = r.left + r.width / 2 - width / 2;
+    let top = r.bottom + margin;
+    if (top + height > window.innerHeight - margin) top = r.top - height - margin;
+    top = Math.max(margin, Math.min(window.innerHeight - height - margin, top));
+    card.style.setProperty('--tour-left', `${left}px`); card.style.top = `${top}px`;
+  }
+  function closeTour() {
+    if (tourTarget) tourTarget.classList.remove('tour-spotlight');
+    tourTarget = null;
+    $('tourShade').classList.add('hidden');
+    $('tourCard').classList.add('hidden');
+    $('helpBtn').focus();
+  }
+  function renderTourStep(index, direction = 1) {
+    const step = TOUR_STEPS[index];
+    let target = document.querySelector(step.target);
+    if (!target || !target.getClientRects().length || target.getBoundingClientRect().width === 0) {
+      const next = index + direction;
+      if (next >= 0 && next < TOUR_STEPS.length) return renderTourStep(next, direction);
+      closeTour(); return;
+    }
+    if (tourTarget) tourTarget.classList.remove('tour-spotlight');
+    tourStep = index;
+    tourTarget = target;
+    target.classList.add('tour-spotlight');
+    $('tourCount').textContent = `Step ${index + 1} of ${TOUR_STEPS.length}`;
+    $('tourTitle').textContent = step.title;
+    $('tourText').textContent = step.text;
+    $('tourBack').disabled = index === 0;
+    $('tourNext').classList.toggle('hidden', index === TOUR_STEPS.length - 1);
+    $('tourFinish').classList.toggle('hidden', index !== TOUR_STEPS.length - 1);
+    $('tourShade').classList.remove('hidden');
+    $('tourCard').classList.remove('hidden');
+    positionTour();
+    target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+    positionTour();
+    requestAnimationFrame(positionTour);
+    setTimeout(positionTour, 250);
+  }
+  function startTour() {
+    renderTourStep(0);
+    $('tourSkip').focus();
+  }
+  $('tourNext').onclick = () => renderTourStep(Math.min(tourStep + 1, TOUR_STEPS.length - 1), 1);
+  $('tourBack').onclick = () => renderTourStep(Math.max(tourStep - 1, 0), -1);
+  $('tourSkip').onclick = closeTour;
+  $('tourFinish').onclick = () => { store.set('pb_tour_done', '1'); closeTour(); };
+  $('helpBtn').onclick = startTour;
+  window.addEventListener('resize', positionTour);
+  window.addEventListener('scroll', positionTour, true);
+  function maybeStartTour() {
+    if (autoTourOpened) return;
+    autoTourOpened = true;
+    if (store.get('pb_tour_done', '0') !== '1') startTour();
+  }
 
   buildTools(); buildPalette(); buildScoreboard(); buildJoin();
   selectTool('pen'); selectColour(TEAMS[myTeam].colour); fitView(); renderScores();

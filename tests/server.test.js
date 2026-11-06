@@ -1,13 +1,20 @@
 /* End-to-end test: starts the real server, connects real websocket clients, checks sync, undo,
    scoreboard and that a restart rebuilds the same canvas from the log.   Run with: npm run test:server */
 const assert = require('assert');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs'), os = require('os'), path = require('path');
 const WebSocket = require('ws');
 const P = require('../public/palette.js');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-'));
 const PORT = 3200 + Math.floor(Math.random() * 500);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+const tooSmall = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+  env: { ...process.env, PORT, DATA_DIR: dir, CANVAS_SIZE: '64' }, encoding: 'utf8', timeout: 5000,
+});
+assert.notStrictEqual(tooSmall.status, 0);
+assert.match(tooSmall.stderr, /CANVAS_SIZE must be an integer of at least 128/);
+console.log('  ok  server rejects canvases smaller than 128x128');
 
 function startServer() {
   const p = spawn('node', [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT, DATA_DIR: dir, COOLDOWN_MS: '300' }, stdio: 'ignore' });
@@ -37,6 +44,10 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
     const okA = await a.next('ok'); assert.strictEqual(okA.pixels, 21); assert.strictEqual(okA.undo, 1);
     const pxB = await b.next('px'); assert.strictEqual(pxB.idx.length, 21);
     console.log('  ok  a line drawn by Ann reaches Ben');
+
+    a.send({ t: 'act', seq: 1, tool: 'pen', pts: [[11, 11]], c: red, f: 0 });
+    assert.match((await a.next('rej')).reason, /sequence/i);
+    console.log('  ok  duplicate action sequences are rejected');
 
     a.send({ t: 'act', seq: 2, tool: 'pen', pts: [[11, 11]], c: red, f: 0 });
     assert.match((await a.next('rej')).reason, /Cooldown/);

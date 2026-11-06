@@ -4,6 +4,7 @@ Run:         python3 tests/browser_test.py        (also refreshes docs/screensho
 import subprocess, time, os, tempfile, json, urllib.request
 from playwright.sync_api import sync_playwright
 PORT=3377; D=tempfile.mkdtemp(); ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__))); S=os.path.join(ROOT,'docs','screenshots')+os.sep
+os.makedirs(S,exist_ok=True)
 env=dict(os.environ, PORT=str(PORT), DATA_DIR=D, COOLDOWN_MS='1200')
 srv=subprocess.Popen(['node','server.js'],cwd=ROOT,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 time.sleep(1)
@@ -21,11 +22,30 @@ def join(pg,name,team):
     if name=='Ama': pg.screenshot(path=S+'03_team.png')
     pg.click('#toConfirm'); pg.click('#joinBtn')
     pg.wait_for_function("document.getElementById('statusTxt').textContent==='live'")
+    if pg.is_visible('#tourCard'):
+        if name=='Ama':
+            pg.click('#tourNext'); assert pg.inner_text('#tourCount')=='Step 2 of 5'
+            pg.click('#tourBack'); assert pg.inner_text('#tourCount')=='Step 1 of 5'
+            for _ in range(4): pg.click('#tourNext')
+            assert pg.is_visible('#tourFinish')
+            pg.click('#tourFinish')
+            assert pg.evaluate("localStorage.getItem('pb_tour_done')==='1'")
+            pg.click('#helpBtn'); assert pg.is_visible('#tourCard')
+            pg.click('#tourSkip'); assert pg.evaluate("localStorage.getItem('pb_tour_done')==='1'")
+        else:
+            bounds=pg.locator('#tourCard').bounding_box()
+            assert bounds['x']>=0 and bounds['y']>=0 and bounds['x']+bounds['width']<=390 and bounds['y']+bounds['height']<=844
+            pg.click('#tourSkip')
+            assert pg.evaluate("localStorage.getItem('pb_tour_done')===null")
+    else:
+        assert name!='Ama', 'first-time player should see the onboarding tour'
 def center(pg,x,y):
     r=pg.eval_on_selector('#world','e=>{const r=e.getBoundingClientRect();return [r.left,r.top,r.width]}')
     k=r[2]/128; return r[0]+(x+.5)*k, r[1]+(y+.5)*k
 def wait_ready(pg): pg.wait_for_function("document.getElementById('cdtxt').textContent==='Ready'",timeout=5000)
-def tool(pg,t): pg.click(f'#tools button[data-id="{t}"]')
+def tool(pg,t):
+    wait_ready(pg)
+    pg.click(f'#tools button[data-id="{t}"]')
 def tap(pg,x,y):
     cx,cy=center(pg,x,y); pg.mouse.click(cx,cy)
 def place(pg):
@@ -41,6 +61,10 @@ with sync_playwright() as p:
     colours={}
     # pen
     tool(pg,'pen'); tap(pg,20,20); place(pg)
+    tool(pg,'pen')
+    x0,y0=center(pg,24,20); x1,y1=center(pg,32,25)
+    pg.mouse.move(x0,y0); pg.mouse.down(); pg.mouse.move(x1,y1,steps=8); pg.mouse.up()
+    place(pg)
     # line
     tool(pg,'line'); pg.click('#palette button[data-i="17"]'); tap(pg,30,95); tap(pg,100,40); place(pg)
     # circle filled
@@ -78,6 +102,7 @@ with sync_playwright() as p:
     pg.locator('summary').click(); pg.screenshot(path=S+'09_palette_sheet.png',full_page=True)
     # ---------- second player sees live sync + scoreboard
     pg2=b.new_page(viewport={'width':1280,'height':900}); hook(pg2,'second'); join(pg2,'Kofi',1)
+    assert not pg2.is_visible('#tourCard'), 'completed tour must not reappear'
     same2=pg2.evaluate("document.getElementById('base').toDataURL()")==pg.evaluate("document.getElementById('base').toDataURL()")
     print('late joiner canvas equals first player canvas:',same2)
     tool(pg2,'pen'); pg2.click('#palette button[data-i="17"]'); tap(pg2,5,5); place(pg2)

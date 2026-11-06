@@ -13,7 +13,8 @@ const B = require('./public/board.js');
 const P = require('./public/palette.js');
 
 const PORT = +process.env.PORT || 3000;
-const SIZE = +process.env.CANVAS_SIZE || 128;
+const SIZE = process.env.CANVAS_SIZE === undefined ? 128 : Number(process.env.CANVAS_SIZE);
+if (!Number.isSafeInteger(SIZE) || SIZE < 128) throw new RangeError('CANVAS_SIZE must be an integer of at least 128');
 const COOLDOWN_MS = process.env.COOLDOWN_MS !== undefined ? +process.env.COOLDOWN_MS : 5000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
@@ -139,6 +140,7 @@ const cleanName = (s) => String(s || '').replace(/[^\p{L}\p{N} _.-]/gu, '').trim
 wss.on('connection', (ws) => {
   ws.player = null;
   ws.alive = true;
+  ws.lastSeq = 0;
   ws.on('pong', () => { ws.alive = true; });
 
   ws.on('message', (data) => {
@@ -155,6 +157,13 @@ wss.on('connection', (ws) => {
       return;
     }
     if (!ws.player) return;
+
+    if (m.t === 'act' || m.t === 'undo') {
+      if (!Number.isSafeInteger(m.seq) || m.seq < 1 || m.seq <= ws.lastSeq) {
+        return send(ws, { t: 'rej', seq: m.seq, reason: 'Invalid or out-of-order action sequence', wait: 0 });
+      }
+      ws.lastSeq = m.seq;
+    }
 
     if (m.t === 'team') {
       if (Number.isInteger(m.team) && m.team >= 0 && m.team < P.TEAMS.length) ws.player.team = m.team;

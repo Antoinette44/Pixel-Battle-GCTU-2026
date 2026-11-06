@@ -7,7 +7,7 @@
   else root.Raster = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
 
-  const LIMITS = { maxPixels: 700, maxFill: 1500, maxPoly: 8, maxRadius: 20 };
+  const LIMITS = { maxPixels: 700, maxFill: 1500, maxPoly: 8, maxRadius: 20, maxPathPoints: 700 };
 
   /* ---------------- frame buffer ---------------- */
   function createFB(w, h, fillValue) {
@@ -141,17 +141,18 @@
 
   /* ---------------- Actions ----------------
      action = { tool: 'pen'|'line'|'circle'|'polygon'|'fill', pts: [[x,y],...], c: colourIndex, f: 0|1 }
-       pen     1 point
+       pen     1..700 points (connected with Bresenham)
        line    2 points (start, end)
        circle  2 points (centre, a point on the rim) ; f = 1 -> filled disc
        polygon 3..8 points (scan-line filled + Bresenham outline)
        fill    1 point (seed)                                                               */
-  const NEED = { pen: [1, 1], line: [2, 2], circle: [2, 2], polygon: [3, LIMITS.maxPoly], fill: [1, 1] };
+  const NEED = { pen: [1, LIMITS.maxPathPoints], line: [2, 2], circle: [2, 2], polygon: [3, LIMITS.maxPoly], fill: [1, 1] };
 
   // Checks a raw (untrusted) action and returns a clean copy, or { error }.
   function normalise(a, fb, numColours) {
     if (!a || typeof a !== 'object' || !NEED[a.tool]) return { error: 'Unknown tool' };
     if (!Number.isInteger(a.c) || a.c < 0 || a.c >= numColours) return { error: 'Bad colour' };
+    if (a.f !== undefined && ![0, 1, false, true].includes(a.f)) return { error: 'Bad fill option' };
     if (!Array.isArray(a.pts)) return { error: 'No points' };
     const [lo, hi] = NEED[a.tool];
     if (a.pts.length < lo || a.pts.length > hi) return { error: 'Wrong number of points' };
@@ -177,7 +178,9 @@
     const p = a.pts;
     switch (a.tool) {
       case 'pen':
-        plot(p[0][0], p[0][1]); break;
+        if (p.length === 1) plot(p[0][0], p[0][1]);
+        else for (let i = 1; i < p.length; i++) bresenham(p[i - 1][0], p[i - 1][1], p[i][0], p[i][1], plot);
+        break;
       case 'line':
         bresenham(p[0][0], p[0][1], p[1][0], p[1][1], plot); break;
       case 'circle': {

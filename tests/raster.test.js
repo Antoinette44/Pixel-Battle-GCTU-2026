@@ -23,6 +23,26 @@ test('Bresenham works in every direction and ends exactly on the end point', () 
     for (let i = 1; i < pts.length; i++) assert(Math.abs(pts[i][0]-pts[i-1][0]) <= 1 && Math.abs(pts[i][1]-pts[i-1][1]) <= 1, 'gap');
   }
 });
+test('Pen connects sampled pointer positions without gaps', () => {
+  const fb = R.createFB(16, 16, 0);
+  const action = { tool: 'pen', pts: [[1, 1], [6, 4], [9, 10]], c: 2, f: 0 };
+  const result = R.applyAction(fb, action);
+  assert(!result.error);
+  for (let i = 1; i < result.changes.length; i++) {
+    const [a, b] = [result.changes[i - 1][0], result.changes[i][0]];
+    const ax = a % fb.w, ay = (a / fb.w) | 0, bx = b % fb.w, by = (b / fb.w) | 0;
+    assert(Math.max(Math.abs(ax - bx), Math.abs(ay - by)) <= 1, 'stroke contains a gap');
+  }
+  assert.strictEqual(R.normalise({ ...action, pts: new Array(R.LIMITS.maxPathPoints + 1).fill([0, 0]) }, fb, P.NUM).error, 'Wrong number of points');
+});
+test('setPixel leaves out-of-bounds coordinates unchanged', () => {
+  const fb = R.createFB(3, 3, 0);
+  assert.strictEqual(R.setPixel(fb, 0, 0, 4), true);
+  assert.strictEqual(R.setPixel(fb, -1, 0, 2), false);
+  assert.strictEqual(R.setPixel(fb, 3, 2, 2), false);
+  assert.strictEqual(R.setPixel(fb, 0, 3, 2), false);
+  assert.deepStrictEqual(Array.from(fb.data), [4, 0, 0, 0, 0, 0, 0, 0, 0]);
+});
 test('Midpoint circle r=10 first octant matches slide 17', () => {
   const o = []; R.midpointCircle(10, (x, y) => o.push([x, y]));
   assert.deepStrictEqual(o, [[0,10],[1,10],[2,10],[3,10],[4,9],[5,9],[6,8],[7,7]]);

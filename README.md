@@ -26,12 +26,12 @@ Options (environment variables): `PORT`, `COOLDOWN_MS` (default 5000), `CANVAS_S
 | # | Requirement | Where |
 |---|-------------|-------|
 | 1 | Shared canvas >= 128x128, own `setPixel` only | `raster.js: setPixel`; the frame buffer is a `Uint8Array` of palette indices. Canvas elements only blit the finished buffer (`putImageData` / `drawImage`). |
-| 2 | Pen, line (Bresenham), circle (midpoint), polygon (scan-line), bucket (queue flood fill) | `raster.js: bresenham, midpointCircle/circle, fillPolygon, floodFill`. DDA is included too (Algorithm lab). |
+| 2 | Pen, line (Bresenham), circle (midpoint), polygon (scan-line), bucket (queue flood fill) | `raster.js: bresenham, midpointCircle/circle, fillPolygon, floodFill`. Pen pointer strokes join sampled points with Bresenham; DDA is included too (Algorithm lab). |
 | 3 | Real-time sync, new player gets the canvas | `server.js` broadcasts every action; the `init` message sends the whole grid on join and on reconnect. |
 | 4 | 16-colour HSB palette + team colours | `palette.js` (hand-written HSB<->RGB). The UI shows H, S, B, RGB and HEX for the selected colour and in the "Palette sheet" table. Colours 16-19 are team colours. |
 | 5 | Cooldown + live team scoreboard | Cooldown is enforced on the **server** per player id (5 s). The scoreboard counts pixels of each team colour, updated on every change. |
 | 6 | Time-lapse replay from a stored action log | Every action is appended to `data/actions.ndjson`. The Replay section loads `/api/log` and re-runs the same rasterizers; speed control, scrubber, video recording. |
-| 7 | Touch + laptop, 15+ players tested | Pointer events: tap = place point, drag = pan, pinch / wheel = zoom. `tools/loadtest.js` simulates N players. |
+| 7 | Touch + laptop, 15+ players tested | Pointer events: pen drag = connected stroke; other one-finger drags pan; pinch / wheel = zoom. `tools/loadtest.js` simulates N players. |
 | + | Stretch | Zoom/pan viewport, export PNG, replay recorded as .webm video, **undo your own actions** (button or Ctrl+Z). |
 
 ### How undo works (public/board.js)
@@ -47,6 +47,9 @@ Options (environment variables): `PORT`, `COOLDOWN_MS` (default 5000), `CANVAS_S
   `raster.js`, so cheating is impossible and the log is tiny. The same function replays the log, so replay = live result.
 * **Limits keep the battle fair:** max 700 pixels per shape, circle radius <= 20, polygon <= 8 corners,
   bucket region <= 1500 pixels (one bucket cannot wipe the canvas). Change them in `LIMITS` at the top of `raster.js`.
+* **Action ordering:** drawing and undo messages require strictly increasing per-connection sequence numbers; duplicate and out-of-order requests are rejected.
+* **First-time help:** a five-step tour starts for players who have not finished it. Finish persists in local storage; Skip does not. Help / Tutorial can restart the tour.
+* **UI palette:** the interface uses navy `#003366`, slate `#36454F`, teal `#01F9C6`, and canvas beige `#E9E0C9`, with Montserrat / Open Sans web fonts and local fallbacks.
 * **y = 0 is the top row** in memory (like image files). The lecture uses bottom-left; the algorithms are identical, the picture is flipped.
 * **Flood fill is 4-connected and queue-based** (no recursion), as on slide 19.
 * Wire format is JSON; the grid is a 16 384-character string of base-36 digits (1 char per pixel).
