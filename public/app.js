@@ -25,8 +25,12 @@
   /* ---------------- state ---------------- */
   let SIZE = 128;
   let fb = Raster.createFB(SIZE, SIZE, BG);
+<<<<<<< Updated upstream
   let pixelTeams = new Int8Array(SIZE * SIZE).fill(-1);
   let tool = 'pen', pts = [], colour = 16, myTeam = hasSavedTeam ? parsedTeam : 0;
+=======
+  let tool = null, pts = [], colour = 16, myTeam = hasSavedTeam ? parsedTeam : 0;
+>>>>>>> Stashed changes
   let readyAt = 0, cooldownMs = 5000, connected = false, seq = 0, ws = null, retry = 500, scores = TEAMS.map(() => 0);
   let zonesOn = true;                   // server tells us whether team-zone restriction is enforced
   let ch = { state: 'idle', dur: 300000, endAt: 0, final: null, winners: [] };   // challenge state; endAt is on THIS browser's monotonic clock
@@ -232,7 +236,7 @@
   stage.addEventListener('pointerdown', (e) => {
     stage.setPointerCapture(e.pointerId);
     const [x, y] = toPixel(e.clientX, e.clientY);
-    const drawing = e.pointerType !== 'mouse' && tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
+    const drawing = !!tool && e.pointerType !== 'mouse' && tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, drawing, points: drawing ? [[x, y]] : [] });
     if (ptrs.size === 1) moved = false;
     else {
@@ -274,7 +278,7 @@
     const p = ptrs.get(e.pointerId);
     if (!p) return;
     const penStroke = p.drawing && e.type === 'pointerup';
-    const wasTap = !p.drawing && ptrs.size === 1 && !moved && e.type === 'pointerup';
+    const wasTap = !!tool && !p.drawing && ptrs.size === 1 && !moved && e.type === 'pointerup';
     if (penStroke) {
       const [x, y] = toPixel(e.clientX, e.clientY);
       const last = p.points[p.points.length - 1];
@@ -292,6 +296,10 @@
   stage.addEventListener('pointerleave', () => { $('hover').style.display = 'none'; });
 
   function hoverAt(cx, cy) {
+    if (!tool) {
+      $('hover').style.display = 'none';
+      return;
+    }
     const [x, y] = toPixel(cx, cy);
     const h = $('hover');
     if (Raster.inBounds(fb, x, y)) {
@@ -322,15 +330,18 @@
     });
   }
   function selectTool(id) {
-    tool = id; pts = [];
-    for (const b of $('tools').children) b.classList.toggle('on', b.dataset.id === id);
-    $('fillOpt').classList.toggle('hidden', id !== 'circle');
-    $('undoPt').classList.toggle('hidden', id !== 'polygon');
-    $('hint').textContent = toolDef().hint;
+    tool = tool === id ? null : id;
+    pts = [];
+    for (const b of $('tools').children) b.classList.toggle('on', b.dataset.id === tool);
+    $('fillOpt').classList.toggle('hidden', tool !== 'circle');
+    $('undoPt').classList.toggle('hidden', tool !== 'polygon');
+    stage.classList.toggle('drawing', !!tool);
+    $('hint').textContent = toolDef()?.hint || 'Navigation mode - select a tool to start drawing.';
     updatePreview();
   }
 
   function tap(x, y) {
+    if (!tool) return;
     if (!Raster.inBounds(fb, x, y)) return;
     if (tool === 'pen' || tool === 'fill') pts = [[x, y]];
     else if (tool === 'line' || tool === 'circle') { if (pts.length === 0) pts = [[x, y]]; else pts = [pts[0], [x, y]]; }
@@ -339,7 +350,9 @@
   }
 
   function buildAction() {
-    if (pts.length < toolDef().need) return null;
+    const def = toolDef();
+    if (!def) return null;
+    if (pts.length < def.need) return null;
     return { tool, pts: pts.map(p => [p[0], p[1]]), c: colour, f: $('filled').checked ? 1 : 0 };
   }
 
@@ -823,6 +836,11 @@
   }
 
   buildTools(); buildPalette(); buildScoreboard(); buildJoin();
-  selectTool('pen'); selectColour(TEAMS[myTeam].colour); fitView(); renderScores();
+  for (const b of $('tools').children) b.classList.remove('on');
+  stage.classList.remove('drawing');
+  $('fillOpt').classList.add('hidden');
+  $('undoPt').classList.add('hidden');
+  $('hint').textContent = 'Navigation mode - select a tool to start drawing.';
+  selectColour(TEAMS[myTeam].colour); updatePreview(); fitView(); renderScores();
   setSize(SIZE); renderAll(); setStatus(false, 'not joined');
 })();
