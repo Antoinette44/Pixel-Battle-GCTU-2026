@@ -86,7 +86,9 @@ function loadLog() {
   console.log(`Loaded ${log.length} actions from ${LOG_FILE}`);
 }
 loadLog();
-let logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+// Log lines are appended SYNCHRONOUSLY. Node runs one handler at a time, so an action can never be written half-way
+// through a reset: it lands either in the old battle's file or in the new one, never in the wrong one.
+const appendLog = (entry) => fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
 
 const gridString = () => Array.from(board.fb.data, v => v.toString(36)).join('');
 
@@ -101,17 +103,20 @@ function finishChallenge() {
 }
 function startChallenge(secs) {
   secs = Math.min(MAX_CHALLENGE_SECS, Math.max(MIN_CHALLENGE_SECS, Math.round(Number(secs) || CHALLENGE_SECS)));
-  resetBattle();                                                 // fair start: empty canvas, scores 0 (old log is archived)
+  const r = resetBattle();                                       // fair start: empty canvas, scores 0 (old log is archived)
+  if (!r.ok) return r;
   ch = { state: 'running', durMs: secs * 1000, endsAt: mono() + secs * 1000, final: null, winners: [] };
   chTimer = setTimeout(finishChallenge, secs * 1000);
   chTick = setInterval(() => broadcast(chInfo()), 5000);         // periodic re-sync of the remaining time
   broadcast(chInfo());
+  return { ok: true };
 }
 function isAdmin(key, req) {
   if (ADMIN_KEY) {
     const h = (s) => crypto.createHash('sha256').update(String(s || '')).digest();
     return crypto.timingSafeEqual(h(key), h(ADMIN_KEY));
   }
+  if (req && req.headers && (req.headers['x-forwarded-for'] || req.headers['forwarded'])) return false;   // came through a proxy: not local
   const a = req && req.socket && req.socket.remoteAddress;       // no key configured: only the host machine itself
   return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
 }
@@ -130,12 +135,14 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/health') { res.writeHead(200); return res.end('ok'); }
   if (url.pathname === '/admin/start') {
     if (!isAdmin(url.searchParams.get('key'), req)) { res.writeHead(403); return res.end('forbidden'); }
-    startChallenge(url.searchParams.get('secs'));
+    const r = startChallenge(url.searchParams.get('secs'));
+    if (!r.ok) { res.writeHead(500); return res.end(r.error); }
     res.writeHead(200); return res.end('challenge started');
   }
   if (url.pathname === '/admin/reset') {
-    if (!ADMIN_KEY || url.searchParams.get('key') !== ADMIN_KEY) { res.writeHead(403); return res.end('forbidden'); }
-    resetBattle();
+    if (!ADMIN_KEY || !isAdmin(url.searchParams.get('key'), req)) { res.writeHead(403); return res.end('forbidden'); }
+    const r = resetBattle();
+    if (!r.ok) { res.writeHead(500); return res.end(r.error); }
     res.writeHead(200); return res.end('battle reset');
   }
   let rel = decodeURIComponent(url.pathname);
@@ -168,9 +175,28 @@ function sendInit(ws) {
   send(ws, { t: 'init', size: SIZE, grid: gridString(), scores, online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length, undo: undoable(playerKey(ws.player.id)), team: ws.player.team, zones: ZONES, ch: chInfo() });
 }
 
+let resetting = false;                           // guard: two resets can never overlap
+// Returns { ok:true } or { ok:false, error }. The FILE is changed first; if that fails nothing in memory is touched,
+// so the server stays consistent (old canvas, old log, old scores) and the admin is told the reset failed.
 function resetBattle() {
-  try { logStream.end(); fs.renameSync(LOG_FILE, path.join(DATA_DIR, `actions-${Date.now()}.ndjson`)); } catch (_) {}
-  logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+  if (resetting) return { ok: false, error: 'A reset is already in progress' };
+  resetting = true;
+  try {
+    try {
+      if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 0) {
+        const archive = path.join(DATA_DIR, `actions-${Date.now()}.ndjson`);    // old battle is kept as a backup, never replayed
+        fs.renameSync(LOG_FILE, archive);
+      }
+      fs.writeFileSync(LOG_FILE, '');                                          // fresh, empty log for the new battle
+    } catch (e) {
+      console.error('Reset failed (log file):', e.message);
+      return { ok: false, error: 'Could not clear the action log: ' + e.message };
+    }
+    doReset();
+    return { ok: true };
+  } finally { resetting = false; }
+}
+function doReset() {
   board = B.create(SIZE, SIZE, P.BG);
   log = [];
   scores = P.TEAMS.map(() => 0);
@@ -179,7 +205,8 @@ function resetBattle() {
   nextUndo.clear();
   clearTimeout(chTimer); clearInterval(chTick);
   ch = { state: 'idle', durMs: ch.durMs, endsAt: 0, final: null, winners: [] };
-  for (const c of wss.clients) if (c.player) sendInit(c);
+  broadcast({ t: 'reset' });                       // tell every browser to drop its local battle state ...
+  for (const c of wss.clients) if (c.player) sendInit(c);   // ... then send the blank canvas, zero scores, own team + cooldown
 }
 
 const cleanName = (s) => String(s || '').replace(/[^\p{L}\p{N} _.-]/gu, '').trim().slice(0, 16) || 'Player';
@@ -209,8 +236,8 @@ wss.on('connection', (ws, req) => {
 
     if (m.t === 'admin') {
       if (!isAdmin(m.key, req)) return send(ws, { t: 'adm', ok: false, msg: 'Host key required' });
-      if (m.cmd === 'start') { startChallenge(m.secs); return send(ws, { t: 'adm', ok: true, msg: 'Challenge started' }); }
-      if (m.cmd === 'reset') { resetBattle(); return send(ws, { t: 'adm', ok: true, msg: 'Battle reset' }); }
+      if (m.cmd === 'start') { const r = startChallenge(m.secs); return send(ws, { t: 'adm', ok: r.ok, msg: r.ok ? 'Challenge started' : r.error }); }
+      if (m.cmd === 'reset') { const r = resetBattle(); return send(ws, { t: 'adm', ok: r.ok, msg: r.ok ? 'Battle reset' : r.error }); }
       return;
     }
 
@@ -265,7 +292,7 @@ wss.on('connection', (ws, req) => {
       nextAllowed.set(ws.player.id, now + COOLDOWN_MS);
       countChanges(res.changes);
       log.push(entry); track(entry, n);
-      logStream.write(JSON.stringify(entry) + '\n');
+      appendLog(entry);
 
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: a.tool, c: a.c,
                   idx: res.changes.map(ch => ch[0]), sc: scores });
@@ -287,7 +314,7 @@ wss.on('connection', (ws, req) => {
 
       countChanges(res.changes);
       log.push(entry); track(entry, n);
-      logStream.write(JSON.stringify(entry) + '\n');
+      appendLog(entry);
 
       // every restored pixel can have a different colour, so send one colour per pixel
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'undo',

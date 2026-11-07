@@ -9,6 +9,7 @@
     "loadtest": "node tools/loadtest.js",
     "test:server": "node tests/server.test.js",
     "test:challenge": "node tests/challenge.test.js",
+    "test:reset": "node tests/reset.test.js",
     "demo": "node tools/demo.js",
     "backup-log": "node tools/backup-log.js",
     "make-demo-log": "node tools/make-demo-log.js",
@@ -22,4 +23,3 @@
   },
   "license": "MIT"
 }
-

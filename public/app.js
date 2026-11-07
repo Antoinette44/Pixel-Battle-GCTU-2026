@@ -454,6 +454,13 @@
         if (pts.length) updatePreview();
       } else if (m.t === 'online') {
         $('online').textContent = m.n;
+      } else if (m.t === 'reset') {
+        // new battle: drop everything local that belonged to the old one (the 'init' that follows carries the blank canvas)
+        pts = []; undoLeft = 0;      // (seq is NOT reset: the server rejects out-of-order sequence numbers)
+        rpStop(); rp.log = []; rpReset(); rpDraw();
+        $('rpSeek').max = 0; $('rpSeek').disabled = true; $('rpPlay').disabled = true; $('rpRec').disabled = true;
+        $('rpInfo').textContent = 'A new battle started - load the log to replay it.';
+        toast('The battle was reset');
       } else if (m.t === 'ch') {
         applyChallenge(m);
       } else if (m.t === 'team') {
@@ -527,7 +534,7 @@
     ws.send(JSON.stringify({ t: 'admin', cmd, key: $('hostKey').value, secs: Math.round((+$('hostMin').value || 5) * 60) }));
   };
   $('hostStart').onclick = () => hostSend('start');
-  $('hostReset').onclick = () => { if (confirm('Reset the battle and clear the canvas?')) hostSend('reset'); };
+  $('hostReset').onclick = () => { if (confirm('Reset Battle?\n\nThis clears the canvas, sets all scores to 0 and starts a new action history for everyone. Teams are kept.')) hostSend('reset'); };
 
   /* ---------------- toast ---------------- */
   let toastTimer = 0;
