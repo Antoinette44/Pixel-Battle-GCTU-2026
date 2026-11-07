@@ -1,9 +1,9 @@
-/* board.js - the battle state: frame buffer + WHO owns each pixel + undo.
+/* board.js - the battle state: frame buffer + WHO owns each pixel + undo/redo.
    Shared by the Node server (live game), the browser replay and the tests, so all three
    run exactly the same code and therefore always end with the same picture.
 
    A log entry is either a drawing   { tool:'pen'|'line'|..., pts, c, f, ... }
-                  or an undo         { tool:'undo', ref: n }   (n = log position of the drawing it removes)
+                  or an undo/redo    { tool:'undo'|'redo', ref: n }   (n = log position of the drawing it changes)
 
    Undo rule (fair to other players): a pixel goes back to its old colour ONLY if it still belongs to the
    action being undone. If somebody painted over it later, their pixel stays.                          */
@@ -28,7 +28,7 @@
       const target = hist.get(entry.ref);
       if (!target) return { error: 'Nothing to undo' };
       if (target.undone) return { error: 'Already undone' };
-      const changes = [];
+      const changes = [], redo = [];
       for (const [i, oldColour, oldOwner] of target.before) {
         if (owner[i] !== entry.ref) continue;           // painted over by someone else: leave it
         let colour = oldColour, who = oldOwner;
@@ -39,10 +39,27 @@
           colour = rec[1]; who = rec[2];
         }
         changes.push([i, fb.data[i], colour]);
+        redo.push([i, colour, who]);
         Raster.setPixel(fb, i % fb.w, (i / fb.w) | 0, colour);
         owner[i] = who;
       }
       target.undone = true;
+      target.redo = redo;
+      return { changes };
+    }
+    if (entry.tool === 'redo') {
+      const target = hist.get(entry.ref);
+      if (!target) return { error: 'Nothing to redo' };
+      if (!target.undone) return { error: 'Action is not undone' };
+      const changes = [];
+      for (const [i, oldColour, oldOwner] of target.redo || []) {
+        if (owner[i] !== oldOwner || fb.data[i] !== oldColour) continue;
+        changes.push([i, fb.data[i], target.colour]);
+        Raster.setPixel(fb, i % fb.w, (i / fb.w) | 0, target.colour);
+        owner[i] = entry.ref;
+      }
+      target.undone = false;
+      target.redo = null;
       return { changes };
     }
 
@@ -54,7 +71,7 @@
       changes.push([i, old, entry.c]);
       owner[i] = n;
     }
-    if (before.length) hist.set(n, { before, undone: false });
+    if (before.length) hist.set(n, { before, undone: false, colour: entry.c });
     return { changes };
   }
 

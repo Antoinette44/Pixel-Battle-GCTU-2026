@@ -27,10 +27,11 @@ const LOG_FILE = path.join(DATA_DIR, 'actions.ndjson');
 const MAX_LOG_LINE_BYTES = 16 * 1024;
 
 /* ---------------- state ---------------- */
-let board = B.create(SIZE, SIZE, P.BG);          // frame buffer + pixel owners + undo history (public/board.js)
-let log = [];                                   // action log (used for the time-lapse); undo is logged too
+let board = B.create(SIZE, SIZE, P.BG);          // frame buffer + pixel owners + undo/redo history (public/board.js)
+let log = [];                                   // action log (used for the time-lapse); undo and redo are logged too
 let scores = P.TEAMS.map(() => 0);              // pixels per team colour
 let mine = new Map();                           // player key -> log positions of that player's drawings (for undo)
+let redone = new Map();                         // player key -> drawings currently available to redo
 let storageError = null;
 
 const colourToTeam = new Map(P.TEAMS.map(t => [t.colour, t.id]));
@@ -61,15 +62,28 @@ function countChanges(changes) {
   }
 }
 
-// Remember who made / undid an action so that "undo my last action" works.
+// Track active drawings and redo history per player; a new drawing clears only that player's redo stack.
 function track(entry, n) {
   if (!entry.u) return;
   const list = mine.get(entry.u) || [];
-  if (entry.tool === 'undo') { const k = list.indexOf(entry.ref); if (k >= 0) list.splice(k, 1); }
-  else list.push(n);
+  const redo = redone.get(entry.u) || [];
+  if (entry.tool === 'undo') {
+    const k = list.indexOf(entry.ref);
+    if (k >= 0) list.splice(k, 1);
+    redo.push(entry.ref);
+  } else if (entry.tool === 'redo') {
+    const k = redo.lastIndexOf(entry.ref);
+    if (k >= 0) redo.splice(k, 1);
+    list.push(entry.ref);
+  } else {
+    list.push(n);
+    redo.length = 0;
+  }
   mine.set(entry.u, list);
+  redone.set(entry.u, redo);
 }
 const undoable = (key) => (mine.get(key) || []).length;
+const redoable = (key) => (redone.get(key) || []).length;
 
 function loadLog() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -86,8 +100,8 @@ function loadLog() {
         u: typeof raw.u === 'string' ? raw.u.slice(0, 64) : '',
         tm: Number.isInteger(raw.tm) && raw.tm >= 0 && raw.tm < P.TEAMS.length ? raw.tm : 0,
         tool: raw.tool };
-      if (raw.tool === 'undo') {
-        if (!Number.isSafeInteger(raw.ref) || raw.ref < 0 || raw.ref >= log.length) throw new Error('invalid undo reference');
+      if (raw.tool === 'undo' || raw.tool === 'redo') {
+        if (!Number.isSafeInteger(raw.ref) || raw.ref < 0 || raw.ref >= log.length) throw new Error(`invalid ${raw.tool} reference`);
         e.ref = raw.ref;
       } else {
         const v = R.normalise(raw, board.fb, P.NUM);
@@ -258,7 +272,8 @@ const onlineCount = () => { let n = 0; for (const c of wss.clients) if (c.player
 
 function sendInit(ws) {
   const wait = Math.max(0, (nextAllowed.get(ws.player.id) || 0) - Date.now());
-  send(ws, { t: 'init', size: SIZE, grid: gridString(), scores, online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length, undo: undoable(playerKey(ws.player.id)), team: ws.player.team, zones: ZONES, ch: chInfo() });
+  const key = playerKey(ws.player.id);
+  send(ws, { t: 'init', size: SIZE, grid: gridString(), scores, online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length, undo: undoable(key), redo: redoable(key), team: ws.player.team, zones: ZONES, ch: chInfo() });
 }
 
 let resetting = false;                           // guard: two resets can never overlap
@@ -300,6 +315,7 @@ function doReset() {
   log = [];
   scores = P.TEAMS.map(() => 0);
   mine = new Map();
+  redone = new Map();
   nextAllowed.clear();
   nextUndo.clear();
   clearTimeout(chTimer); clearInterval(chTick);
@@ -342,18 +358,18 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    if ((m.t === 'act' || m.t === 'undo') && chOver()) {
+    if ((m.t === 'act' || m.t === 'undo' || m.t === 'redo') && chOver()) {
       finishChallenge();                                                      // make sure the end is announced
       return send(ws, { t: 'rej', seq: m.seq, reason: 'The challenge is over', wait: 0 });
     }
 
-    if (m.t === 'act' || m.t === 'undo') {
+    if (m.t === 'act' || m.t === 'undo' || m.t === 'redo') {
       if (!Number.isSafeInteger(m.seq) || m.seq < 1 || m.seq <= ws.lastSeq) {
         return send(ws, { t: 'rej', seq: m.seq, reason: 'Invalid or out-of-order action sequence', wait: 0 });
       }
       ws.lastSeq = m.seq;
     }
-    if ((m.t === 'act' || m.t === 'undo') && storageError)
+    if ((m.t === 'act' || m.t === 'undo' || m.t === 'redo') && storageError)
       return send(ws, { t: 'rej', seq: m.seq, reason: 'Action storage is unavailable; ask the host to reset or restart the service', wait: 0 });
 
     if (m.t === 'team') {
@@ -403,7 +419,7 @@ wss.on('connection', (ws, req) => {
 
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: a.tool, c: a.c,
                   idx: res.changes.map(ch => ch[0]), sc: scores });
-      send(ws, { t: 'ok', seq: m.seq, wait: COOLDOWN_MS, pixels: res.changes.length, undo: undoable(key) });
+      send(ws, { t: 'ok', seq: m.seq, wait: COOLDOWN_MS, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
       return;
     }
 
@@ -430,7 +446,32 @@ wss.on('connection', (ws, req) => {
       // every restored pixel can have a different colour, so send one colour per pixel
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'undo',
                   idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), sc: scores });
-      send(ws, { t: 'undone', seq: m.seq, pixels: res.changes.length, undo: undoable(key) });
+      send(ws, { t: 'undone', seq: m.seq, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
+      return;
+    }
+
+    if (m.t === 'redo') {
+      const now = Date.now(), key = playerKey(ws.player.id);
+      if (now < (nextUndo.get(ws.player.id) || 0)) return send(ws, { t: 'rej', seq: m.seq, reason: 'Slow down a little', wait: 0 });
+      const list = redone.get(key) || [];
+      if (!list.length) return send(ws, { t: 'rej', seq: m.seq, reason: 'You have nothing to redo', wait: 0 });
+      nextUndo.set(ws.player.id, now + UNDO_GAP_MS);
+
+      const n = log.length;
+      const entry = { n, ts: now, p: ws.player.name, u: key, tm: ws.player.team, tool: 'redo', ref: list[list.length - 1] };
+      const saved = appendEntry(entry);
+      if (saved.error) return send(ws, { t: 'rej', seq: m.seq, reason: 'Could not save this redo; drawing is paused until storage is repaired', wait: 0 });
+      const res = B.apply(board, entry, n);
+      if (res.error) {
+        rollbackEntry(saved.offset);
+        return send(ws, { t: 'rej', seq: m.seq, reason: res.error, wait: 0 });
+      }
+
+      countChanges(res.changes);
+      log.push(entry); track(entry, n);
+      broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'redo',
+                  idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), sc: scores });
+      send(ws, { t: 'redone', seq: m.seq, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
     }
   });
 

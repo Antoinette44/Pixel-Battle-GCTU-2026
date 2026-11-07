@@ -73,6 +73,7 @@ const ok = (s) => console.log('  ok  ' + s);
     await sleep(250);
     b.act({ tool: 'pen', pts: [[90, 10]], c: blue, f: 0 }); assert.match((await b.next('rej')).reason, /over/); ok('drawing is refused after the end');
     b.ws.send(JSON.stringify({ t: 'undo', seq: 99 })); assert.match((await b.next('rej')).reason, /over/); ok('undo is refused after the end');
+    b.ws.send(JSON.stringify({ t: 'redo', seq: 100 })); assert.match((await b.next('rej')).reason, /over/); ok('redo is refused after the end');
     // ---- draw ----
     b.msgs.length = 0;
     b.admin('start', 5);

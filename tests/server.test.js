@@ -1,4 +1,4 @@
-/* End-to-end test: starts the real server, connects real websocket clients, checks sync, undo,
+/* End-to-end test: starts the real server, connects real websocket clients, checks sync, undo/redo,
    scoreboard and that a restart rebuilds the same canvas from the log.   Run with: npm run test:server */
 const assert = require('assert');
 const { spawn, spawnSync } = require('child_process');
@@ -33,7 +33,12 @@ function client(name, team) {
     ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', id: 'testid-' + name + '-' + Math.random().toString(16).slice(2), name, team })));
     ws.on('message', (d) => {
       const m = JSON.parse(d); c.msgs.push(m);
-      if (m.t === 'init') { c.grid = m.grid; c.scores = m.scores; c.undo = m.undo; resolve(c); }
+      if (m.t === 'init') { c.grid = m.grid; c.scores = m.scores; c.undo = m.undo; c.redo = m.redo; resolve(c); }
+      else if (m.t === 'px' && c.grid) {
+        const grid = c.grid.split('');
+        m.idx.forEach((i, k) => { grid[i] = (m.cols ? m.cols[k] : m.c).toString(36); });
+        c.grid = grid.join(''); c.scores = m.sc;
+      }
     });
     c.next = async (t) => { for (let i = 0; i < 100; i++) { const k = c.msgs.findIndex(m => m.t === t); if (k >= 0) return c.msgs.splice(k, 1)[0]; await sleep(20); } throw new Error('timeout waiting for ' + t); };
     c.send = (o) => ws.send(JSON.stringify(o));
@@ -47,6 +52,7 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
     const home = await get('/');
     assert.strictEqual(home.status, 200);
     assert.match(home.body, /src="app\.js"/);
+    assert.match(home.body, /id="redoAction"/);
     assert.strictEqual((await get('/raster.js')).status, 200);
     assert.strictEqual((await get('/health')).status, 200);
     assert.strictEqual((await get('/admin/reset')).status, 404);
@@ -104,14 +110,25 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
     await sleep(350);
     a.send({ t: 'undo', seq: 3 });
     const und = await a.next('undone'); assert.strictEqual(und.pixels, 20, 'Ben\'s pixel must survive');
-    assert.strictEqual(und.undo, 0);
+    assert.strictEqual(und.undo, 0); assert.strictEqual(und.redo, 1);
     const pxU = await b.next('px'); while (pxU.tool !== 'undo') Object.assign(pxU, await b.next('px'));
     assert(Array.isArray(pxU.cols) && pxU.cols.length === 20);
     console.log('  ok  undo removes only my pixels and everybody sees it');
 
+    await sleep(550);
+    a.send({ t: 'redo', seq: 4 });
+    const redoAck = await a.next('redone'); assert.strictEqual(redoAck.pixels, 20);
+    assert.strictEqual(redoAck.undo, 1); assert.strictEqual(redoAck.redo, 0);
+    const pxR = await b.next('px'); while (pxR.tool !== 'redo') Object.assign(pxR, await b.next('px'));
+    assert.strictEqual(pxR.idx.length, 20, 'redo must leave Ben\'s overwritten pixel untouched');
+    assert.deepStrictEqual(pxR.sc, recount(b.grid), 'redo scores must match the live canvas');
+    console.log('  ok  redo is broadcast to other players without overwriting pixels or inflating scores');
+
     b.send({ t: 'undo', seq: 4 }); await b.next('undone');
     await sleep(550);
-    a.send({ t: 'undo', seq: 5 }); assert.match((await a.next('rej')).reason, /nothing to undo/i);
+    a.send({ t: 'undo', seq: 5 }); assert.strictEqual((await a.next('undone')).pixels, 21);
+    await sleep(550);
+    a.send({ t: 'undo', seq: 6 }); assert.match((await a.next('rej')).reason, /nothing to undo/i);
     console.log('  ok  nothing-to-undo is refused; Ben can undo his own pixel');
 
     const late = await client('Late', 2);
@@ -121,11 +138,11 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
 
     // draw something that stays, then restart the server
     await sleep(350);
-    a.send({ t: 'act', seq: 6, tool: 'circle', pts: [[60, 60], [66, 60]], c: red, f: 1 }); await a.next('ok');
+    a.send({ t: 'act', seq: 7, tool: 'circle', pts: [[60, 60], [66, 60]], c: red, f: 1 }); await a.next('ok');
     await sleep(350);
-    a.send({ t: 'act', seq: 7, tool: 'polygon', pts: [[90, 90], [100, 90], [95, 100]], c: blue, f: 0 }); await a.next('ok');
+    a.send({ t: 'act', seq: 8, tool: 'polygon', pts: [[90, 90], [100, 90], [95, 100]], c: blue, f: 0 }); await a.next('ok');
     await sleep(350);
-    a.send({ t: 'undo', seq: 8 }); await a.next('undone');                        // undo the polygon
+    a.send({ t: 'undo', seq: 9 }); await a.next('undone');                        // undo the polygon
     const before = await client('Check1', 3);
     assert.deepStrictEqual(before.scores, recount(before.grid), 'scoreboard must equal a recount of the canvas');
     console.log('  ok  scoreboard equals a recount of the canvas');
@@ -136,7 +153,7 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
     const after = await client('Check2', 3);
     assert.strictEqual(after.grid, before.grid, 'restart must rebuild the identical canvas from the log');
     assert.deepStrictEqual(after.scores, before.scores);
-    console.log('  ok  after a restart the canvas and scores are rebuilt identically (undo included)');
+    console.log('  ok  after a restart the canvas and scores are rebuilt identically (undo/redo included)');
 
     // the logged undo entries must replay to the same picture in the browser code
     const B = require('../public/board.js');
@@ -145,7 +162,8 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
     assert.strictEqual(Array.from(rb.fb.data, v => v.toString(36)).join(''), after.grid);
     assert(log.some(e => e.tool === 'undo'));
     assert(log.every(e => !('id' in e)), 'the secret player id must not be in the public log');
-    console.log('  ok  replaying /api/log (with undo entries) equals the live canvas; no secret ids leak');
+    assert(log.some(e => e.tool === 'redo'));
+    console.log('  ok  replaying /api/log (with undo/redo entries) equals the live canvas; no secret ids leak');
     console.log('\nserver tests passed');
     after.ws.close(); srv.kill(); process.exit(0);
   } catch (e) { console.error('FAIL', e); srv.kill(); process.exit(1); }

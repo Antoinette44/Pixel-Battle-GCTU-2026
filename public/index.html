@@ -137,7 +137,10 @@
     <div id="swatchInfo" class="info"></div>
 
     <div class="row actions">
-      <button id="undoAction" disabled title="Undo my last action (Ctrl+Z)">Undo</button>
+      <div class="history-actions">
+        <button id="undoAction" disabled title="Undo my last action (Ctrl+Z)">Undo</button>
+        <button id="redoAction" disabled title="Redo my last undone action (Ctrl+Shift+Z or Ctrl+Y)">Redo</button>
+      </div>
       <button id="undoPt" class="hidden">Undo point</button>
       <button id="cancel">Cancel</button>
       <button id="place" class="primary" disabled>Place</button>

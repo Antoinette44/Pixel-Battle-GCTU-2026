@@ -79,7 +79,10 @@ main { display:flex; gap:16px; padding:0 18px 20px; min-width:0; max-width:1680p
 .sw.team::after { content:attr(data-t); position:absolute; inset:0; display:grid; place-items:center; font-size:11px; font-weight:800; color:#fff; text-shadow:0 0 3px #000; }
 .info { font-size:12.5px; color:var(--muted); background:#f7f8f6; border:1px solid #e4e8e4; border-radius:10px; padding:9px 11px; min-height:44px; line-height:1.55; }
 .info b { color:var(--txt); }
-.actions button { flex:1; min-height:42px; } .actions .primary { flex:2; padding:12px; font-size:15px; }
+.history-actions { display:flex; flex:2 1 0; min-width:0; gap:8px; }
+.history-actions button { flex:1 1 0; min-width:0; min-height:42px; padding:8px 5px; }
+.actions > button { flex:1 1 0; min-width:0; min-height:42px; }
+.actions > .primary { flex:2 1 0; padding:12px 8px; font-size:15px; }
 .msg { min-height:20px; font-size:13px; color:#9b342e; } .msg.good { color:#17654d; }
 .chk { display:flex; gap:6px; align-items:center; }
 details { background:#f7f8f6; border:1px solid var(--line); border-radius:10px; padding:9px 11px; }

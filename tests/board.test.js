@@ -15,6 +15,35 @@ test('undo restores the old colour', () => {
   assert.strictEqual(at(b, 3, 3), 0);
 });
 
+test('redo restores only pixels that still match the state left by undo', () => {
+  const b = B.create(16, 16, 0);
+  B.apply(b, { tool: 'line', pts: [[1, 1], [3, 1]], c: 5, f: 0 }, 0);
+  B.apply(b, px(2, 1, 9), 1);                    // another player overwrites the middle pixel
+  const undone = B.apply(b, { tool: 'undo', ref: 0 }, 2);
+  assert.strictEqual(undone.changes.length, 2);
+  const redone = B.apply(b, { tool: 'redo', ref: 0 }, 3);
+  assert.deepStrictEqual(redone.changes, [[17, 0, 5], [19, 0, 5]]);
+  assert.strictEqual(at(b, 1, 1), 5);
+  assert.strictEqual(at(b, 2, 1), 9);
+  assert.strictEqual(at(b, 3, 1), 5);
+  assert(B.apply(b, { tool: 'redo', ref: 0 }, 4).error, 'the same drawing cannot be redone twice');
+});
+
+test('redo does not overwrite pixels drawn after undo and can be replayed', () => {
+  const live = B.create(16, 16, 0), log = [
+    px(4, 4, 5),
+    { tool: 'undo', ref: 0 },
+    px(4, 4, 9),
+    { tool: 'redo', ref: 0 },
+  ];
+  log.forEach((entry, n) => assert(!B.apply(live, entry, n).error));
+  assert.strictEqual(at(live, 4, 4), 9);
+  assert.deepStrictEqual(B.apply(live, { tool: 'undo', ref: 0 }, 4).changes, []);
+  const replay = B.create(16, 16, 0);
+  log.forEach((entry, n) => assert(!B.apply(replay, entry, n).error));
+  assert.deepStrictEqual(Array.from(replay.fb.data), Array.from(live.fb.data));
+});
+
 test('undo of a line removes the whole line', () => {
   const b = B.create(16, 16, 0);
   B.apply(b, { tool: 'line', pts: [[0, 0], [10, 4]], c: 7, f: 0 }, 0);

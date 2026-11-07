@@ -31,6 +31,7 @@
   let ch = { state: 'idle', dur: 300000, endAt: 0, final: null, winners: [] };   // challenge state; endAt is on THIS browser's monotonic clock
   let shownResult = false;
   let undoLeft = 0;                       // how many of MY drawings can still be undone (server tells us)
+  let redoLeft = 0;                       // how many of MY undone drawings can be restored
   let pid = store.get('pb_id', '');
   if (!/^[\w-]{8,64}$/.test(pid)) {
     pid = Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
@@ -384,7 +385,9 @@
     $('panel').classList.toggle('cooling', cooling());
     $('place').disabled = !(previewOK && connected && !cooling() && ch.state !== 'ended');
     $('undoAction').disabled = !(connected && undoLeft > 0 && ch.state !== 'ended');
+    $('redoAction').disabled = !(connected && redoLeft > 0 && ch.state !== 'ended');
     $('undoAction').textContent = undoLeft > 0 ? `Undo (${undoLeft})` : 'Undo';
+    $('redoAction').textContent = redoLeft > 0 ? `Redo (${redoLeft})` : 'Redo';
   }
 
   $('cancel').onclick = () => { pts = []; updatePreview(); };
@@ -392,6 +395,10 @@
   $('undoAction').onclick = () => {
     if (!connected || undoLeft < 1) return;
     seq++; ws.send(JSON.stringify({ t: 'undo', seq }));
+  };
+  $('redoAction').onclick = () => {
+    if (!connected || redoLeft < 1) return;
+    seq++; ws.send(JSON.stringify({ t: 'redo', seq }));
   };
   $('filled').onchange = updatePreview;
   $('place').onclick = place;
@@ -408,7 +415,13 @@
     if (e.key >= '1' && e.key <= '5') selectTool(TOOLS[+e.key - 1].id);
     else if (e.key === 'Enter') place();
     else if (e.key === 'Escape') $('cancel').onclick();
-    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); $('undoAction').onclick(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) $('redoAction').onclick();
+      else $('undoAction').onclick();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      e.preventDefault(); $('redoAction').onclick();
+    }
   });
 
   /* ---------------- palette ---------------- */
@@ -484,7 +497,7 @@
         for (let i = 0; i < m.grid.length; i++) fb.data[i] = parseInt(m.grid[i], 36);
         renderAll(); scores = m.scores; renderScores();
         cooldownMs = m.cooldown; readyAt = Date.now() + m.wait;
-        $('online').textContent = m.online; $('actions').textContent = m.actions; undoLeft = m.undo || 0;
+        $('online').textContent = m.online; $('actions').textContent = m.actions; undoLeft = m.undo || 0; redoLeft = m.redo || 0;
         zonesOn = m.zones !== false;
         if (Number.isInteger(m.team)) setMyTeam(m.team);                       // the server remembers my team
         applyChallenge(m.ch);
@@ -499,7 +512,7 @@
         $('online').textContent = m.n;
       } else if (m.t === 'reset') {
         // new battle: drop everything local that belonged to the old one (the 'init' that follows carries the blank canvas)
-        pts = []; undoLeft = 0;      // (seq is NOT reset: the server rejects out-of-order sequence numbers)
+        pts = []; undoLeft = 0; redoLeft = 0;      // (seq is NOT reset: the server rejects out-of-order sequence numbers)
         rpStop(); rp.log = []; rpReset(); rpDraw();
         $('rpSeek').max = 0; $('rpSeek').disabled = true; $('rpPlay').disabled = true; $('rpRec').disabled = true;
         $('rpInfo').textContent = 'A new battle started - load the log to replay it.';
@@ -512,9 +525,11 @@
         toast(m.msg);
       } else if (m.t === 'ok') {
         readyAt = Date.now() + m.wait; cooldownMs = m.wait;
-        undoLeft = m.undo || 0; pts = []; updatePreview(); setMsg('Placed ' + m.pixels + ' pixels', true);
+        undoLeft = m.undo || 0; redoLeft = m.redo || 0; pts = []; updatePreview(); setMsg('Placed ' + m.pixels + ' pixels', true);
       } else if (m.t === 'undone') {
-        undoLeft = m.undo || 0; refreshButtons(); setMsg('Undone: ' + m.pixels + ' pixel' + (m.pixels === 1 ? '' : 's') + ' restored', true);
+        undoLeft = m.undo || 0; redoLeft = m.redo || 0; refreshButtons(); setMsg('Undone: ' + m.pixels + ' pixel' + (m.pixels === 1 ? '' : 's') + ' removed', true);
+      } else if (m.t === 'redone') {
+        undoLeft = m.undo || 0; redoLeft = m.redo || 0; refreshButtons(); setMsg('Redone: ' + m.pixels + ' pixel' + (m.pixels === 1 ? '' : 's') + ' restored', true);
       } else if (m.t === 'rej') {
         if (m.wait) readyAt = Date.now() + m.wait;
         toast(m.reason); setMsg(m.reason); refreshButtons();
@@ -627,7 +642,7 @@
     $('rpSeek').value = rp.n;
     if (rp.n === 0) { $('rpInfo').textContent = `0 / ${N} actions`; return; }
     const e = rp.log[rp.n - 1], t0 = rp.log[0].ts, s = Math.round((e.ts - t0) / 1000);
-    $('rpInfo').textContent = `${rp.n} / ${N} actions  |  battle time ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}  |  ${e.p} (${TEAMS[e.tm].name}) ${e.tool === 'undo' ? 'undid an action' : 'used ' + e.tool}`;
+    $('rpInfo').textContent = `${rp.n} / ${N} actions  |  battle time ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}  |  ${e.p} (${TEAMS[e.tm].name}) ${e.tool === 'undo' ? 'undid an action' : e.tool === 'redo' ? 'redid an action' : 'used ' + e.tool}`;
   }
   function rpSeekTo(n) { if (n < rp.n) rpReset(); rpAdvance(n); rpDraw(); }
   function rpRate() {

@@ -37,22 +37,24 @@ The HTTP server binds to `0.0.0.0`; the browser chooses `ws://` or `wss://` from
 | 5 | Cooldown + live team scoreboard | Cooldown is enforced on the **server** per player id (5 s). The scoreboard counts pixels of each team colour, updated on every change. |
 | 6 | Time-lapse replay from a stored action log | Every action is appended to `DATA_DIR/actions.ndjson` (`./data/actions.ndjson` by default). The Replay section loads `/api/log` and re-runs the same rasterizers; speed control, scrubber, video recording. |
 | 7 | Touch + laptop, 15+ players tested | Pointer events: pen drag = connected stroke; other one-finger drags pan; pinch / wheel = zoom. `tools/loadtest.js` simulates N players. |
-| + | Stretch | Zoom/pan viewport, export PNG, replay recorded as .webm video, **undo your own actions** (button or Ctrl+Z). |
+| + | Stretch | Zoom/pan viewport, export PNG, replay recorded as .webm video, **undo/redo your own actions** (buttons, Ctrl+Z and Ctrl+Shift+Z / Ctrl+Y). |
 
-### How undo works (public/board.js)
+### How undo/redo works (public/board.js)
 * The board remembers, for every pixel, **which action painted it last** and what was there before.
 * "Undo" removes your last drawing that is still active. A pixel only goes back if it is **still yours**: if another player painted over it
-  afterwards, their pixel stays (fair play). Undoing is not allowed twice, and has a 0.5 s anti-spam gap. It does **not** refund the cooldown.
-* An undo is written to the action log as `{tool:'undo', ref:n}`, and the replay uses the same `board.js`, so the time-lapse always equals the live canvas
-  (checked by a randomized test and by the browser test, which compares every pixel).
-* The log stores a short one-way hash of the player id (`u`), never the secret id, so undo still works after a server restart.
+  afterwards, their pixel stays (fair play). Redo restores only pixels that still have the state left behind by the undo, so it also
+  preserves later multiplayer edits. New drawings clear that player's redo history. Undo/redo actions have a 0.5 s anti-spam gap and do
+  not refund the drawing cooldown.
+* Undo and redo are written to the action log as `{tool:'undo'|'redo', ref:n}`, and replay uses the same `board.js`, so the time-lapse
+  always equals the live canvas. Score changes are calculated only for pixels that actually change.
+* The log stores a short one-way hash of the player id (`u`), never the secret id, so undo/redo history survives a server restart.
 
 ### Design decisions you should be able to explain
 * **The server is the authority.** Clients send an *action* (`tool + points + colour`), not pixels. The server runs the same
   `raster.js`, validates the resulting pixels and team-zone limits, and records the action. The same function replays the log, so replay = live result.
 * **Limits keep the battle fair:** max 700 pixels per shape, circle radius <= 20, polygon <= 8 corners,
   bucket region <= 1500 pixels (one bucket cannot wipe the canvas). Change them in `LIMITS` at the top of `raster.js`.
-* **Action ordering:** drawing and undo messages require strictly increasing per-connection sequence numbers; duplicate and out-of-order requests are rejected.
+* **Action ordering:** drawing, undo and redo messages require strictly increasing per-connection sequence numbers; duplicate and out-of-order requests are rejected.
 * **First-time help:** a five-step tour starts for players who have not finished it. Finish persists in local storage; Skip does not. Help / Tutorial can restart the tour.
 * **UI palette:** the interface uses navy `#003366`, slate `#36454F`, teal `#01F9C6`, and canvas beige `#E9E0C9`, with Montserrat / Open Sans web fonts and local fallbacks.
 * **y = 0 is the top row** in memory (like image files). The lecture uses bottom-left; the algorithms are identical, the picture is flipped.
@@ -86,7 +88,7 @@ public/index.html    game page          public/style.css   responsive styles
 public/app.js        client: viewport, tools, palette, network, replay
 public/raster.js     OUR rasterizers (shared by browser + server)
 public/palette.js    HSB palette (shared)
-public/board.js      frame buffer + pixel owners + undo (shared by server, replay, tests)
+public/board.js      frame buffer + pixel owners + undo/redo (shared by server, replay, tests)
 public/lab.html      Algorithm lab: step tables for DDA / Bresenham / midpoint (use in your presentation)
 tests/*.test.js      unit + server tests   tests/browser_test.py  real-browser test
 tools/loadtest.js    load test             tools/backup-log.js, demo.js, make-demo-log.js   keep / replay a battle
