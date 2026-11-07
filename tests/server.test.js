@@ -17,7 +17,7 @@ assert.match(tooSmall.stderr, /CANVAS_SIZE must be an integer of at least 128/);
 console.log('  ok  server rejects canvases smaller than 128x128');
 
 function startServer() {
-  const p = spawn('node', [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT, DATA_DIR: dir, COOLDOWN_MS: '300' }, stdio: 'ignore' });
+  const p = spawn('node', [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT, DATA_DIR: dir, COOLDOWN_MS: '300', ZONES: '0' }, stdio: 'ignore' });
   return p;
 }
 function client(name, team) {

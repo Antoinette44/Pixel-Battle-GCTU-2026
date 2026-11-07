@@ -27,6 +27,9 @@
   let fb = Raster.createFB(SIZE, SIZE, BG);
   let tool = 'pen', pts = [], colour = 16, myTeam = hasSavedTeam ? parsedTeam : 0;
   let readyAt = 0, cooldownMs = 5000, connected = false, seq = 0, ws = null, retry = 500, scores = TEAMS.map(() => 0);
+  let zonesOn = true;                   // server tells us whether team-zone restriction is enforced
+  let ch = { state: 'idle', dur: 300000, endAt: 0, final: null, winners: [] };   // challenge state; endAt is on THIS browser's monotonic clock
+  let shownResult = false;
   let undoLeft = 0;                       // how many of MY drawings can still be undone (server tells us)
   let pid = store.get('pb_id', '');
   if (!/^[\w-]{8,64}$/.test(pid)) {
@@ -55,8 +58,60 @@
     $('world').style.width = n + 'px'; $('world').style.height = n + 'px';
     fb = Raster.createFB(n, n, BG);
     baseImg = baseCtx.createImageData(n, n); prevImg = prevCtx.createImageData(n, n);
+    buildZones();
     fitView();
   }
+
+  /* ---------------- team zones (visual overlay on the ONE shared canvas) ----------------
+     Four equal quadrants from Board.zoneRect - the same geometry the server uses to validate drawing. */
+  function buildZones() {
+    const zs = $('zones'); zs.innerHTML = '';
+    TEAMS.forEach((t) => {
+      const [x0, y0, x1, y1] = Board.zoneRect(SIZE, t.id), [r, g, b] = COLOURS[t.colour].rgb;
+      const d = document.createElement('div');
+      d.className = 'zone'; d.dataset.t = t.id;
+      d.style.cssText = `left:${x0}px;top:${y0}px;width:${x1 - x0 + 1}px;height:${y1 - y0 + 1}px;--zc:${COLOURS[t.colour].hex};--zt:rgba(${r},${g},${b},.05);--zt2:rgba(${r},${g},${b},.11)`;
+      d.innerHTML = `<span></span>`;
+      zs.appendChild(d);
+    });
+    updateZones();
+  }
+  function updateZones() {
+    for (const d of $('zones').children) {
+      const t = +d.dataset.t, mine = t === myTeam;
+      d.classList.toggle('mine', mine);
+      d.firstChild.textContent = mine ? `${TEAMS[t].name} - your zone` : TEAMS[t].name;
+    }
+  }
+
+  /* ---------------- pixel grid overlay ----------------
+     A screen-space canvas above the board. Its pixels are written by our own code (Uint32 writes into an ImageData),
+     one device pixel wide, so every line is crisp and equally thick at any zoom. It never touches the frame buffer
+     and has pointer-events:none, so it cannot influence drawing or coordinate mapping.                          */
+  const gridCv = $('gridc'), gridCtx = gridCv.getContext('2d');
+  let gridImg = null, gridQueued = false;
+  const LE = (r, g, b, a) => ((a << 24) | (b << 16) | (g << 8) | r) >>> 0;     // RGBA -> little-endian Uint32
+  function drawGrid() {
+    gridQueued = false;
+    const dpr = window.devicePixelRatio || 1;
+    const W = Math.max(1, Math.round(stage.clientWidth * dpr)), H = Math.max(1, Math.round(stage.clientHeight * dpr));
+    if (gridCv.width !== W || gridCv.height !== H || !gridImg) { gridCv.width = W; gridCv.height = H; gridImg = gridCtx.createImageData(W, H); }
+    const px = new Uint32Array(gridImg.data.buffer); px.fill(0);
+    const cell = z * dpr, ox = tx * dpr, oy = ty * dpr, span = SIZE * cell;
+    const xa = Math.max(0, Math.round(ox)), xb = Math.min(W, Math.round(ox + span));
+    const ya = Math.max(0, Math.round(oy)), yb = Math.min(H, Math.round(oy + span));
+    const vline = (sx, w, col) => { for (let x = sx; x < sx + w; x++) if (x >= 0 && x < W) for (let y = ya; y < yb; y++) px[y * W + x] = col; };
+    const hline = (sy, w, col) => { for (let y = sy; y < sy + w; y++) if (y >= 0 && y < H) for (let x = xa; x < xb; x++) px[y * W + x] = col; };
+    if (cell >= 5) {                                                           // thin grid only when pixels are big enough to be useful
+      const a = Math.round(Math.min(70, 26 + (cell - 5) * 2.5));
+      const col = LE(70, 82, 100, a);
+      for (let k = 0; k <= SIZE; k++) { vline(Math.round(ox + k * cell), 1, col); hline(Math.round(oy + k * cell), 1, col); }
+    }
+    const mid = Math.ceil(SIZE / 2), dark = LE(35, 45, 65, 170), tw = dpr >= 2 ? 3 : 2;   // zone dividers (always visible)
+    vline(Math.round(ox + mid * cell) - 1, tw, dark); hline(Math.round(oy + mid * cell) - 1, tw, dark);
+    gridCtx.putImageData(gridImg, 0, 0);
+  }
+  const requestGrid = () => { if (!gridQueued) { gridQueued = true; requestAnimationFrame(drawGrid); } };
 
   /* ---------------- viewport: zoom + pan ----------------
      #stage is the fixed-size viewport (overflow:hidden, so zooming never changes the page layout).
@@ -84,9 +139,8 @@
   const applyView = () => {
     clampView();
     world.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
-    const grid = $('grid');
-    grid.style.setProperty('--grid-line-width', `${Math.min(0.075, 0.5 / z)}px`);
-    grid.style.opacity = Math.min(0.22, 0.035 + Math.max(0, z - 6) * 0.0045);
+    $('zones').style.setProperty('--zline', `${Math.max(0.12, 2 / z)}px`);
+    requestGrid();
     $('zpct').textContent = Math.round(z / fitZ * 100) + '%';           // 100% = "Fit"
     $('zpct').title = '1 board pixel = ' + z.toFixed(2) + ' screen px';
     $('zin').disabled = z >= MAX_Z - 1e-6;
@@ -253,6 +307,7 @@
     }
     previewOK = false;
     const a = buildAction();
+    if (a && a.tool === 'fill' && zonesOn) a.clip = Board.zoneRect(SIZE, myTeam);      // same clip the server applies
     const rgb = COLOURS[colour].rgb;
     const plot = (x, y) => { if (Raster.inBounds(fb, x, y)) plotRGBA(prevImg, x, y, rgb, 210); };
     setMsg('');
@@ -260,9 +315,14 @@
       const r = Raster.rasterize(fb, a);
       if (r.error) setMsg(r.error);
       else {
-        let n = 0;
-        for (const i of r.idx) if (fb.data[i] !== a.c) { plot(i % SIZE, (i / SIZE) | 0); n++; }
-        if (n === 0) setMsg('Nothing would change here.');
+        let n = 0, outside = 0;
+        for (const i of r.idx) if (fb.data[i] !== a.c) {
+          plot(i % SIZE, (i / SIZE) | 0); n++;
+          if (zonesOn && Board.zoneTeam(SIZE, i % SIZE, (i / SIZE) | 0) !== myTeam) outside++;
+        }
+        if (a.tool === 'fill' && zonesOn && !n && Board.zoneTeam(SIZE, a.pts[0][0], a.pts[0][1]) !== myTeam) setMsg('Tap inside your own team zone.');
+        else if (outside) setMsg('Stay inside your team zone (' + TEAMS[myTeam].name + ').');
+        else if (n === 0) setMsg('Nothing would change here.');
         else { previewOK = true; setMsg(n + ' pixel' + (n > 1 ? 's' : '') + ' will change', true); }
       }
     } else if (tool === 'polygon' && pts.length === 2) {
@@ -275,12 +335,12 @@
   function setMsg(t, good) { $('msg').textContent = t; $('msg').className = 'msg' + (good ? ' good' : ''); }
   const cooling = () => Date.now() < readyAt;
   function refreshButtons() {
-    const unavailable = !connected || cooling();
+    const unavailable = !connected || cooling() || ch.state === 'ended';
     for (const b of $('tools').children) b.disabled = unavailable;
     for (const b of $('palette').children) b.disabled = unavailable;
     $('panel').classList.toggle('cooling', cooling());
-    $('place').disabled = !(previewOK && connected && !cooling());
-    $('undoAction').disabled = !(connected && undoLeft > 0);
+    $('place').disabled = !(previewOK && connected && !cooling() && ch.state !== 'ended');
+    $('undoAction').disabled = !(connected && undoLeft > 0 && ch.state !== 'ended');
     $('undoAction').textContent = undoLeft > 0 ? `Undo (${undoLeft})` : 'Undo';
   }
 
@@ -382,6 +442,9 @@
         renderAll(); scores = m.scores; renderScores();
         cooldownMs = m.cooldown; readyAt = Date.now() + m.wait;
         $('online').textContent = m.online; $('actions').textContent = m.actions; undoLeft = m.undo || 0;
+        zonesOn = m.zones !== false;
+        if (Number.isInteger(m.team)) setMyTeam(m.team);                       // the server remembers my team
+        applyChallenge(m.ch);
         setStatus(true, 'live'); updatePreview(); maybeStartTour();
       } else if (m.t === 'px') {
         m.idx.forEach((i, k) => { const col = m.cols ? m.cols[k] : m.c; Raster.setPixel(fb, i % SIZE, (i / SIZE) | 0, col); paintIndex(i, col); });
@@ -391,6 +454,12 @@
         if (pts.length) updatePreview();
       } else if (m.t === 'online') {
         $('online').textContent = m.n;
+      } else if (m.t === 'ch') {
+        applyChallenge(m);
+      } else if (m.t === 'team') {
+        if (m.ok) { setMyTeam(m.team); colour = TEAMS[myTeam].colour; selectColour(colour); } else { setMyTeam(m.team); toast(m.reason); }
+      } else if (m.t === 'adm') {
+        toast(m.msg);
       } else if (m.t === 'ok') {
         readyAt = Date.now() + m.wait; cooldownMs = m.wait;
         undoLeft = m.undo || 0; pts = []; updatePreview(); setMsg('Placed ' + m.pixels + ' pixels', true);
@@ -402,6 +471,63 @@
       }
     };
   }
+
+  /* ---------------- team (session) ---------------- */
+  function setMyTeam(t) {
+    myTeam = t; store.set('pb_team', t);
+    $('teamSel').value = t; renderScores(); updateZones(); updatePreview();
+  }
+
+  /* ---------------- challenge timer (display only: the SERVER owns the clock) ----------------
+     The server sends the REMAINING time; we count down on performance.now(), which does not depend on the
+     device's wall clock, so changing the browser/system clock cannot change the timer.                      */
+  const fmt = (ms) => { const s = Math.ceil(ms / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+  function applyChallenge(info) {
+    if (!info) return;
+    const prev = ch.state;
+    ch = { state: info.state, dur: info.dur, endAt: performance.now() + (info.rem || 0), final: info.final, winners: info.winners || [] };
+    if (ch.state !== 'ended') { shownResult = false; $('result').classList.add('hidden'); }
+    else if (!shownResult) showResult();
+    if (prev !== ch.state) refreshButtons();
+    renderTimer();
+  }
+  function renderTimer() {
+    const left = ch.state === 'running' ? Math.max(0, ch.endAt - performance.now()) : 0;
+    const txt = ch.state === 'running' ? fmt(left) : ch.state === 'ended' ? '00:00' : '--:--';
+    $('chTime').textContent = txt; $('timerHead').textContent = txt;
+    $('chState').textContent = ch.state === 'running' ? 'Challenge running - most team-colour pixels wins' :
+      ch.state === 'ended' ? 'Challenge over' : 'Waiting for the host to start the challenge (warm-up drawing is allowed)';
+    const bar = $('chbar');
+    bar.classList.toggle('running', ch.state === 'running'); bar.classList.toggle('ended', ch.state === 'ended');
+    bar.classList.toggle('low', ch.state === 'running' && left <= 30000);
+  }
+  setInterval(renderTimer, 200);
+  function showResult() {
+    shownResult = true;
+    const f = ch.final || scores, w = ch.winners;
+    const draw = w.length !== 1;
+    const hex = draw ? '#36454F' : COLOURS[TEAMS[w[0]].colour].hex;
+    $('resBadge').style.background = hex; $('resBadge').textContent = draw ? '=' : TEAM_WORD[w[0]][0];
+    $('resTitle').textContent = draw ? 'It is a draw!' : `${TEAMS[w[0]].name} win!`;
+    $('resTitle').style.color = hex;
+    $('resSub').textContent = draw ? `Tied: ${w.map(i => TEAMS[i].name).join(' & ')} with ${f[w[0]]} pixel${f[w[0]] === 1 ? '' : 's'} each.` : `${f[w[0]]} pixel${f[w[0]] === 1 ? '' : 's'} in their team colour.`;
+    $('resScores').innerHTML = TEAMS.map((t) => `<div class="${w.includes(t.id) ? 'win' : ''}" style="border-color:${COLOURS[t.colour].hex}"><span>${t.name}</span><span>${f[t.id]}</span></div>`).join('');
+    $('result').classList.remove('hidden');
+  }
+  $('resClose').onclick = () => $('result').classList.add('hidden');
+
+  /* host controls: only shown with ?host in the address; the SERVER checks the host key (or localhost) */
+  const qs = new URLSearchParams(location.search);
+  if (qs.has('host')) {
+    $('hostBox').classList.remove('hidden');
+    if (qs.get('key')) $('hostKey').value = qs.get('key'); else $('hostKey').classList.remove('hidden');
+  }
+  const hostSend = (cmd) => {
+    if (!connected) return toast('Not connected');
+    ws.send(JSON.stringify({ t: 'admin', cmd, key: $('hostKey').value, secs: Math.round((+$('hostMin').value || 5) * 60) }));
+  };
+  $('hostStart').onclick = () => hostSend('start');
+  $('hostReset').onclick = () => { if (confirm('Reset the battle and clear the canvas?')) hostSend('reset'); };
 
   /* ---------------- toast ---------------- */
   let toastTimer = 0;
@@ -540,8 +666,8 @@
     const sel = $('teamSel');
     TEAMS.forEach((t) => { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; sel.appendChild(o); });
     sel.onchange = () => {
-      myTeam = +sel.value; store.set('pb_team', myTeam); renderScores(); colour = TEAMS[myTeam].colour; selectColour(colour);
-      if (connected) ws.send(JSON.stringify({ t: 'team', team: myTeam }));
+      if (connected) ws.send(JSON.stringify({ t: 'team', team: +sel.value }));      // the server validates and confirms the change
+      else sel.value = myTeam;
     };
   }
   $('joinBtn').onclick = () => {

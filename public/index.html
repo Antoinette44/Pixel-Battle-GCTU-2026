@@ -75,9 +75,20 @@
   <div class="hstat"><span id="dot" class="dot off"></span><span id="statusTxt">connecting</span></div>
   <div class="hstat">Players: <b id="online">0</b></div>
   <div class="hstat">Actions: <b id="actions">0</b></div>
+  <div class="hstat">Time: <b id="timerHead">--:--</b></div>
   <button id="helpBtn" type="button" aria-label="Restart the tutorial">Help / Tutorial</button>
   <nav><a href="lab.html" target="_blank">Algorithm lab</a></nav>
 </header>
+
+<section id="chbar" aria-label="Challenge timer">
+  <div class="chinfo"><span id="chState">Waiting for the host to start the challenge</span><b id="chTime">--:--</b></div>
+  <div id="hostBox" class="hostbox hidden">
+    <label>Minutes <input id="hostMin" type="number" min="1" max="60" step="1" value="5"></label>
+    <input id="hostKey" type="password" placeholder="Host key" autocomplete="off" class="hidden">
+    <button id="hostStart" class="primary" type="button">Start challenge</button>
+    <button id="hostReset" type="button">Reset</button>
+  </div>
+</section>
 
 <section id="score" aria-label="Team scoreboard"></section>
 
@@ -88,10 +99,12 @@
       <div id="world">
         <canvas id="base" width="128" height="128"></canvas>
         <canvas id="prev" width="128" height="128"></canvas>
-        <div id="grid" aria-hidden="true"></div>
+        <div id="zones" aria-hidden="true"></div>
         <div id="hover"></div>
         <div id="marks"></div>
       </div>
+      <!-- pixel grid + zone dividers: a screen-space overlay drawn with our own pixel writes; it is never part of the frame buffer -->
+      <canvas id="gridc" aria-hidden="true"></canvas>
     </div>
     <!-- zoom bar sits UNDER the viewport so it never covers board pixels -->
     <div id="hud">
@@ -165,6 +178,16 @@
     </div>
   </div>
 </section>
+
+<div id="result" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="resTitle">
+  <div class="card">
+    <div id="resBadge" class="badge"></div>
+    <h2 id="resTitle" style="text-align:center"></h2>
+    <p id="resSub" class="muted"></p>
+    <div id="resScores" class="resScores"></div>
+    <button id="resClose" class="primary big" type="button">Close</button>
+  </div>
+</div>
 
 <div id="toast"></div>
 

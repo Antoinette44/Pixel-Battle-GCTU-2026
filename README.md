@@ -21,6 +21,8 @@ For the online class activity, deploy to Render / Railway (see below) and share 
 Options (environment variables): `PORT`, `COOLDOWN_MS` (default 5000), `CANVAS_SIZE` (default 128),
 `DATA_DIR` (action log folder), `ADMIN_KEY` (enables `/admin/reset?key=...` to wipe the battle before the show).
 
+**Team zones and challenge timer.** The canvas is split into four quadrants (Red top-left, Blue top-right, Green bottom-left, Gold bottom-right); the server only accepts drawing inside the player's own zone (`ZONES=0` turns this off). The host opens `http://localhost:3000/?host` (add `&key=ADMIN_KEY` when `ADMIN_KEY` is set; without a key only the host machine itself is accepted), sets the minutes (default 5, or `CHALLENGE_SECS`) and presses *Start challenge*. Starting archives the old log and clears the canvas. `GET /admin/start?key=...&secs=300` does the same. Tests: `npm run test:challenge`.
+
 ## How it meets the brief
 
 | # | Requirement | Where |
@@ -96,3 +98,4 @@ git init && git add . && git commit -m "Initial project skeleton"
 git remote add origin <your GitHub/GitLab URL> && git push -u origin main
 ```
 Every member commits under their own name (`git config user.name` / `user.email`), in different weeks.
+

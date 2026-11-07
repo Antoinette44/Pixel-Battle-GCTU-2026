@@ -58,5 +58,13 @@
     return { changes };
   }
 
-  return { create, apply };
+  /* ---- team zones: the canvas is split into 4 equal quadrants (purely geometry on the SAME frame buffer) ----
+     team 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.                                   */
+  const zoneTeam = (size, x, y) => (x * 2 >= size ? 1 : 0) + (y * 2 >= size ? 2 : 0);
+  function zoneRect(size, team) {                        // inclusive [x0, y0, x1, y1]
+    const half = Math.ceil(size / 2), cx = team & 1, cy = team >> 1;
+    return [cx ? half : 0, cy ? half : 0, cx ? size - 1 : half - 1, cy ? size - 1 : half - 1];
+  }
+
+  return { create, apply, zoneTeam, zoneRect };
 });
