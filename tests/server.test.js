@@ -29,14 +29,18 @@ function startServer() {
 }
 function client(name, team) {
   return new Promise((resolve) => {
-    const ws = new WebSocket('ws://localhost:' + PORT), c = { ws, msgs: [], grid: null, scores: null };
+    const ws = new WebSocket('ws://localhost:' + PORT), c = { ws, msgs: [], grid: null, scores: null, teams: null };
     ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', id: 'testid-' + name + '-' + Math.random().toString(16).slice(2), name, team })));
     ws.on('message', (d) => {
       const m = JSON.parse(d); c.msgs.push(m);
-      if (m.t === 'init') { c.grid = m.grid; c.scores = m.scores; c.undo = m.undo; c.redo = m.redo; resolve(c); }
+      if (m.t === 'init') {
+        c.grid = m.grid; c.teams = Array.from(m.teams, v => parseInt(v, 36) - 1);
+        c.scores = m.scores; c.undo = m.undo; c.redo = m.redo; resolve(c);
+      }
       else if (m.t === 'px' && c.grid) {
         const grid = c.grid.split('');
         m.idx.forEach((i, k) => { grid[i] = (m.cols ? m.cols[k] : m.c).toString(36); });
+        m.idx.forEach((i, k) => { c.teams[i] = m.teams[k]; });
         c.grid = grid.join(''); c.scores = m.sc;
       }
     });
@@ -44,7 +48,7 @@ function client(name, team) {
     c.send = (o) => ws.send(JSON.stringify(o));
   });
 }
-const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 36) === t.colour).length);
+const recount = (owners) => P.TEAMS.map(t => owners.filter(team => team === t.id).length);
 
 (async () => {
   let srv = startServer(); await sleep(700);
@@ -90,29 +94,36 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
     console.log('  ok  malformed and oversized WebSocket messages are closed');
 
     const a = await client('Ann', 0), b = await client('Ben', 1);
-    const red = P.TEAMS[0].colour, blue = P.TEAMS[1].colour;
+    const paletteColour = 3;
 
-    a.send({ t: 'act', seq: 1, tool: 'line', pts: [[10, 10], [30, 10]], c: red, f: 0 });
+    a.send({ t: 'act', seq: 1, tool: 'line', pts: [[10, 10], [30, 10]], c: paletteColour, f: 0 });
     const okA = await a.next('ok'); assert.strictEqual(okA.pixels, 21); assert.strictEqual(okA.undo, 1);
     const pxB = await b.next('px'); assert.strictEqual(pxB.idx.length, 21);
+    assert.deepStrictEqual(pxB.sc, [21, 0, 0, 0]);
     console.log('  ok  a line drawn by Ann reaches Ben');
 
-    a.send({ t: 'act', seq: 1, tool: 'pen', pts: [[11, 11]], c: red, f: 0 });
+    a.send({ t: 'act', seq: 1, tool: 'pen', pts: [[11, 11]], c: paletteColour, f: 0 });
     assert.match((await a.next('rej')).reason, /sequence/i);
     console.log('  ok  duplicate action sequences are rejected');
 
-    a.send({ t: 'act', seq: 2, tool: 'pen', pts: [[11, 11]], c: red, f: 0 });
+    a.send({ t: 'act', seq: 2, tool: 'pen', pts: [[11, 11]], c: paletteColour, f: 0 });
     assert.match((await a.next('rej')).reason, /Cooldown/);
     console.log('  ok  cooldown is enforced by the server');
 
-    b.send({ t: 'act', seq: 1, tool: 'pen', pts: [[20, 10]], c: blue, f: 0 });   // Ben paints over one of Ann's pixels
+    b.send({ t: 'act', seq: 1, tool: 'pen', pts: [[20, 10]], c: paletteColour, f: 0 }); // Ben takes ownership without changing the visible colour.
     await b.next('ok');
+    const takeover = await b.next('px');
+    assert.strictEqual(takeover.idx.length, 1);
+    assert.deepStrictEqual(takeover.sc, [20, 1, 0, 0]);
+    assert.strictEqual(b.grid[10 * 128 + 20], paletteColour.toString(36), 'ownership changes while drawing colour stays the same');
     await sleep(350);
     a.send({ t: 'undo', seq: 3 });
     const und = await a.next('undone'); assert.strictEqual(und.pixels, 20, 'Ben\'s pixel must survive');
     assert.strictEqual(und.undo, 0); assert.strictEqual(und.redo, 1);
     const pxU = await b.next('px'); while (pxU.tool !== 'undo') Object.assign(pxU, await b.next('px'));
     assert(Array.isArray(pxU.cols) && pxU.cols.length === 20);
+    assert.deepStrictEqual(pxU.sc, [0, 1, 0, 0]);
+    assert.deepStrictEqual(pxU.sc, recount(b.teams), 'undo must restore team ownership and scoring');
     console.log('  ok  undo removes only my pixels and everybody sees it');
 
     await sleep(550);
@@ -121,7 +132,7 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
     assert.strictEqual(redoAck.undo, 1); assert.strictEqual(redoAck.redo, 0);
     const pxR = await b.next('px'); while (pxR.tool !== 'redo') Object.assign(pxR, await b.next('px'));
     assert.strictEqual(pxR.idx.length, 20, 'redo must leave Ben\'s overwritten pixel untouched');
-    assert.deepStrictEqual(pxR.sc, recount(b.grid), 'redo scores must match the live canvas');
+    assert.deepStrictEqual(pxR.sc, recount(b.teams), 'redo scores must match pixel team ownership');
     console.log('  ok  redo is broadcast to other players without overwriting pixels or inflating scores');
 
     b.send({ t: 'undo', seq: 4 }); await b.next('undone');
@@ -138,13 +149,13 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
 
     // draw something that stays, then restart the server
     await sleep(350);
-    a.send({ t: 'act', seq: 7, tool: 'circle', pts: [[60, 60], [66, 60]], c: red, f: 1 }); await a.next('ok');
+    a.send({ t: 'act', seq: 7, tool: 'circle', pts: [[60, 60], [66, 60]], c: P.TEAMS[0].colour, f: 1 }); await a.next('ok');
     await sleep(350);
-    a.send({ t: 'act', seq: 8, tool: 'polygon', pts: [[90, 90], [100, 90], [95, 100]], c: blue, f: 0 }); await a.next('ok');
+    a.send({ t: 'act', seq: 8, tool: 'polygon', pts: [[90, 90], [100, 90], [95, 100]], c: P.TEAMS[1].colour, f: 0 }); await a.next('ok');
     await sleep(350);
     a.send({ t: 'undo', seq: 9 }); await a.next('undone');                        // undo the polygon
     const before = await client('Check1', 3);
-    assert.deepStrictEqual(before.scores, recount(before.grid), 'scoreboard must equal a recount of the canvas');
+    assert.deepStrictEqual(before.scores, recount(before.teams), 'scoreboard must equal a recount of pixel team ownership');
     console.log('  ok  scoreboard equals a recount of the canvas');
     for (const c of [a, b, late, before]) c.ws.close();
     srv.kill(); await sleep(400);

@@ -13,13 +13,21 @@ function client(name, team, id) {
   return new Promise((resolve) => {
     const ws = new WebSocket('ws://localhost:' + PORT), c = { ws, msgs: [], seq: 0 };
     ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', id: id || 'cid-' + name + '-' + Math.random().toString(16).slice(2), name, team })));
-    ws.on('message', (d) => { const m = JSON.parse(d); c.msgs.push(m); if (m.t === 'init') { c.init = m; resolve(c); } });
+    ws.on('message', (d) => {
+      const m = JSON.parse(d); c.msgs.push(m);
+      if (m.t === 'init') {
+        c.init = m; c.owners = Array.from(m.teams, v => parseInt(v, 36) - 1); resolve(c);
+      } else if (m.t === 'px' && c.owners) {
+        m.idx.forEach((i, k) => { c.owners[i] = m.teams[k]; });
+      }
+    });
     c.next = async (t, pred = () => true) => { for (let i = 0; i < 150; i++) { const k = c.msgs.findIndex(m => m.t === t && pred(m)); if (k >= 0) return c.msgs.splice(k, 1)[0]; await sleep(20); } throw new Error('timeout waiting for ' + t); };
     c.act = (o) => ws.send(JSON.stringify({ t: 'act', seq: ++c.seq, ...o }));
     c.admin = (cmd, secs) => ws.send(JSON.stringify({ t: 'admin', cmd, secs }));
   });
 }
 const ok = (s) => console.log('  ok  ' + s);
+const recount = (owners) => P.TEAMS.map(t => owners.filter(team => team === t.id).length);
 (async () => {
   try {
     const red = P.TEAMS[0].colour, blue = P.TEAMS[1].colour;
@@ -47,9 +55,11 @@ const ok = (s) => console.log('  ok  ' + s);
     for (const [p, q] of wall) { a2.act({ tool: 'line', pts: [p, q], c: red, f: 0 }); await a2.next('ok'); await sleep(250); }
     a2.act({ tool: 'fill', pts: [[25, 25]], c: P.TEAMS[0].colour - 1, f: 0 });   // paint pocket with a normal palette colour
     const f = await a2.next('ok'); assert.strictEqual(f.pixels, 81 - 0); ok('queue flood fill still works inside the zone (81-pixel pocket)');
-    // ---- scoring: normal colours do not count, overwriting moves points ----
+    // ---- scoring: every pixel counts for its team, independent of palette colour ----
     const s1 = (await a2.next('px', m => m.tool === 'fill')).sc;
-    assert.strictEqual(s1[0], 1 + 40 /* 1 pen pixel + 4 walls sharing corners */ - 0 + 0 - 0 === s1[0] ? s1[0] : s1[0]); assert.strictEqual(s1[1] + s1[2] + s1[3], 0); ok('palette colours are not scored');
+    assert.deepStrictEqual(s1, [122, 0, 0, 0]);
+    assert.deepStrictEqual(recount(a2.owners), s1);
+    ok('palette-colour pen, walls and bucket pixels all count for the drawing team');
     // ---- timer ----
     b.msgs.length = 0;
     b.admin('start', 5);
@@ -58,18 +68,19 @@ const ok = (s) => console.log('  ok  ' + s);
     const a3 = await client('Late', 2);
     assert(a3.init.ch.state === 'running' && a3.init.ch.rem <= start.rem); ok('a late joiner gets the remaining time and a blank canvas');
     assert.strictEqual(a3.init.grid, '0'.repeat(128 * 128));
-    b.act({ tool: 'pen', pts: [[80, 10]], c: blue, f: 0 }); await b.next('ok');
+    b.act({ tool: 'pen', pts: [[80, 10]], c: blue, f: 0 }); await b.next('ok'); await b.next('px');
     await sleep(250);
-    b.act({ tool: 'pen', pts: [[81, 10]], c: blue, f: 0 }); await b.next('ok');
-    // overwrite one of Blue's team pixels with Red's colour? Red cannot enter the Blue zone -> score stays; Blue overwrites own pixel with a palette colour -> -1
+    b.act({ tool: 'pen', pts: [[81, 10]], c: blue, f: 0 }); await b.next('ok'); await b.next('px');
+    // A non-team palette colour still belongs to Blue and must not reduce its score.
     await sleep(250);
     b.act({ tool: 'pen', pts: [[81, 10]], c: 4, f: 0 }); const px = await b.next('px', m => m.idx && m.sc); await b.next('ok');
-    const sc = (await a.next('px', m => m.sc[1] === 1, 0).catch(() => null));
-    const g = await client('Check', 1); const count = P.TEAMS.map(t => [...g.init.grid].filter(ch => parseInt(ch, 36) === t.colour).length);
-    assert.deepStrictEqual(g.init.scores, count); assert.deepStrictEqual(count, [0, 1, 0, 0]); ok('overwriting a team-colour pixel subtracts it; scoreboard equals a recount: ' + count);
+    assert.deepStrictEqual(px.sc, [0, 2, 0, 0]);
+    const g = await client('Check', 1); const count = recount(g.owners);
+    assert.deepStrictEqual(g.init.scores, count); assert.deepStrictEqual(count, [0, 2, 0, 0]);
+    ok('Blue palette-colour pixels remain Blue-owned; scoreboard matches an ownership recount');
     await sleep(5200);
-    const end = await a.next('ch', m => m.state === 'ended'); assert.deepStrictEqual(end.final, [0, 1, 0, 0]); assert.deepStrictEqual(end.winners, [1]);
-    ok('timer ended on the server; final scores ' + end.final + ', winner = team ' + end.winners[0] + ' (Blue)');
+    const end = await a.next('ch', m => m.state === 'ended'); assert.deepStrictEqual(end.final, [0, 2, 0, 0]); assert.deepStrictEqual(end.winners, [1]);
+    ok('timer ended on the server; final ownership scores ' + end.final + ', winner = team ' + end.winners[0] + ' (Blue)');
     await sleep(250);
     b.act({ tool: 'pen', pts: [[90, 10]], c: blue, f: 0 }); assert.match((await b.next('rej')).reason, /over/); ok('drawing is refused after the end');
     b.ws.send(JSON.stringify({ t: 'undo', seq: 99 })); assert.match((await b.next('rej')).reason, /over/); ok('undo is refused after the end');

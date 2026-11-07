@@ -116,13 +116,13 @@
   /* ---------------- Queue-based flood fill, 4-connected (slide 19) ---------------- */
   // Returns an array of pixel indices, [] if nothing to do, or null if the region is bigger than `limit`.
   // Optional clip = [x0, y0, x1, y1] (inclusive): the fill may not enter pixels outside it (used for team zones).
-  function floodFill(fb, sx, sy, newColour, limit, clip) {
+  function floodFill(fb, sx, sy, newColour, limit, clip, includeSameColour = false) {
     if (!inBounds(fb, sx, sy)) return [];
     const w = fb.w, h = fb.h;
     const cx0 = clip ? clip[0] : 0, cy0 = clip ? clip[1] : 0, cx1 = clip ? clip[2] : w - 1, cy1 = clip ? clip[3] : h - 1;
     if (sx < cx0 || sx > cx1 || sy < cy0 || sy > cy1) return [];
     const old = fb.data[sy * w + sx];
-    if (old === newColour) return [];
+    if (old === newColour && !includeSameColour) return [];
     const queue = new Int32Array(w * h);
     const seen = new Uint8Array(w * h);
     let head = 0, tail = 0;
@@ -169,7 +169,7 @@
   }
 
   // Works out WHICH pixels an action touches (does not write). Returns { idx } or { error }.
-  function rasterize(fb, a) {
+  function rasterize(fb, a, includeSameColour = false) {
     const w = fb.w;
     const marks = new Uint8Array(fb.w * fb.h);
     const idx = [];
@@ -200,7 +200,7 @@
         }
         break;
       case 'fill': {
-        const region = floodFill(fb, p[0][0], p[0][1], a.c, LIMITS.maxFill, a.clip);
+        const region = floodFill(fb, p[0][0], p[0][1], a.c, LIMITS.maxFill, a.clip, includeSameColour);
         if (region === null) return { error: 'Area too big for one bucket (max ' + LIMITS.maxFill + ' pixels)' };
         return { idx: region };
       }

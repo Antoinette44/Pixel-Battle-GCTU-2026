@@ -5,8 +5,8 @@
    A log entry is either a drawing   { tool:'pen'|'line'|..., pts, c, f, ... }
                   or an undo/redo    { tool:'undo'|'redo', ref: n }   (n = log position of the drawing it changes)
 
-   Undo rule (fair to other players): a pixel goes back to its old colour ONLY if it still belongs to the
-   action being undone. If somebody painted over it later, their pixel stays.                          */
+   Undo rule (fair to other players): a pixel's colour and team go back ONLY if it still belongs to the
+   action being undone. If somebody painted over it later, their pixel stays.                           */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./raster.js'));
   else root.Board = factory(root.Raster);
@@ -16,32 +16,34 @@
     return {
       fb: Raster.createFB(w, h, bg),
       owner: new Int32Array(w * h).fill(-1),   // log position of the action that last painted the pixel (-1 = nobody)
-      hist: new Map(),                         // log position -> { before: [[index, oldColour, oldOwner], ...], undone }
+      teams: new Int8Array(w * h).fill(-1),    // team that owns each pixel; independent of its drawing colour
+      hist: new Map(),                         // log position -> { before: [[index, oldColour, oldOwner, oldTeam], ...], undone }
     };
   }
 
   // Applies one VALID log entry at log position n.
-  // Returns { changes: [[index, oldColour, newColour], ...] } or { error }.
+  // Returns { changes: [[index, oldColour, newColour, oldTeam, newTeam], ...] } or { error }.
   function apply(board, entry, n) {
-    const { fb, owner, hist } = board;
+    const { fb, owner, teams, hist } = board;
     if (entry.tool === 'undo') {
       const target = hist.get(entry.ref);
       if (!target) return { error: 'Nothing to undo' };
       if (target.undone) return { error: 'Already undone' };
       const changes = [], redo = [];
-      for (const [i, oldColour, oldOwner] of target.before) {
+      for (const [i, oldColour, oldOwner, oldTeam] of target.before) {
         if (owner[i] !== entry.ref) continue;           // painted over by someone else: leave it
-        let colour = oldColour, who = oldOwner;
+        let colour = oldColour, who = oldOwner, team = oldTeam;
         // the previous owner may itself have been undone meanwhile: look further back
         while (who >= 0 && hist.get(who) && hist.get(who).undone) {
           const rec = hist.get(who).before.find(b => b[0] === i);
           if (!rec) break;
-          colour = rec[1]; who = rec[2];
+          colour = rec[1]; who = rec[2]; team = rec[3];
         }
-        changes.push([i, fb.data[i], colour]);
-        redo.push([i, colour, who]);
+        changes.push([i, fb.data[i], colour, teams[i], team]);
+        redo.push([i, colour, who, team]);
         Raster.setPixel(fb, i % fb.w, (i / fb.w) | 0, colour);
         owner[i] = who;
+        teams[i] = team;
       }
       target.undone = true;
       target.redo = redo;
@@ -52,26 +54,32 @@
       if (!target) return { error: 'Nothing to redo' };
       if (!target.undone) return { error: 'Action is not undone' };
       const changes = [];
-      for (const [i, oldColour, oldOwner] of target.redo || []) {
-        if (owner[i] !== oldOwner || fb.data[i] !== oldColour) continue;
-        changes.push([i, fb.data[i], target.colour]);
+      for (const [i, oldColour, oldOwner, oldTeam] of target.redo || []) {
+        if (owner[i] !== oldOwner || fb.data[i] !== oldColour || teams[i] !== oldTeam) continue;
+        changes.push([i, fb.data[i], target.colour, teams[i], target.team]);
         Raster.setPixel(fb, i % fb.w, (i / fb.w) | 0, target.colour);
         owner[i] = entry.ref;
+        teams[i] = target.team;
       }
       target.undone = false;
       target.redo = null;
       return { changes };
     }
 
-    const res = Raster.applyAction(fb, entry);          // writes the pixels with setPixel
+    const res = Raster.rasterize(fb, entry, true);
     if (res.error) return res;
     const changes = [], before = [];
-    for (const [i, old] of res.changes) {
-      before.push([i, old, owner[i]]);
-      changes.push([i, old, entry.c]);
+    const team = Number.isInteger(entry.tm) && entry.tm >= 0 && entry.tm < 4 ? entry.tm : -1;
+    for (const i of res.idx) {
+      const old = fb.data[i], oldTeam = teams[i];
+      if (old === entry.c && oldTeam === team) continue;
+      before.push([i, old, owner[i], oldTeam]);
+      changes.push([i, old, entry.c, oldTeam, team]);
+      if (old !== entry.c) Raster.setPixel(fb, i % fb.w, (i / fb.w) | 0, entry.c);
       owner[i] = n;
+      teams[i] = team;
     }
-    if (before.length) hist.set(n, { before, undone: false, colour: entry.c });
+    if (before.length) hist.set(n, { before, undone: false, colour: entry.c, team });
     return { changes };
   }
 

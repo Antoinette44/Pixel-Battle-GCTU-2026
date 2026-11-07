@@ -11,7 +11,7 @@ test('undo restores the old colour', () => {
   B.apply(b, px(3, 3, 5), 0);
   assert.strictEqual(at(b, 3, 3), 5);
   const r = B.apply(b, { tool: 'undo', ref: 0 }, 1);
-  assert.deepStrictEqual(r.changes, [[3 * 16 + 3, 5, 0]]);
+  assert.deepStrictEqual(r.changes, [[3 * 16 + 3, 5, 0, -1, -1]]);
   assert.strictEqual(at(b, 3, 3), 0);
 });
 
@@ -22,7 +22,7 @@ test('redo restores only pixels that still match the state left by undo', () => 
   const undone = B.apply(b, { tool: 'undo', ref: 0 }, 2);
   assert.strictEqual(undone.changes.length, 2);
   const redone = B.apply(b, { tool: 'redo', ref: 0 }, 3);
-  assert.deepStrictEqual(redone.changes, [[17, 0, 5], [19, 0, 5]]);
+  assert.deepStrictEqual(redone.changes, [[17, 0, 5, -1, -1], [19, 0, 5, -1, -1]]);
   assert.strictEqual(at(b, 1, 1), 5);
   assert.strictEqual(at(b, 2, 1), 9);
   assert.strictEqual(at(b, 3, 1), 5);
@@ -42,6 +42,34 @@ test('redo does not overwrite pixels drawn after undo and can be replayed', () =
   const replay = B.create(16, 16, 0);
   log.forEach((entry, n) => assert(!B.apply(replay, entry, n).error));
   assert.deepStrictEqual(Array.from(replay.fb.data), Array.from(live.fb.data));
+});
+
+test('pixel team ownership is independent of colour and survives undo/redo', () => {
+  const b = B.create(16, 16, 0), i = 4 * 16 + 4;
+  assert(!B.apply(b, { ...px(4, 4, 3), tm: 0 }, 0).error); // Team 0 draws with a palette colour.
+  assert.strictEqual(b.fb.data[i], 3);
+  assert.strictEqual(b.teams[i], 0);
+
+  const takeover = B.apply(b, { ...px(4, 4, 3), tm: 1 }, 1); // Same colour, new team's ownership.
+  assert.deepStrictEqual(takeover.changes, [[i, 3, 3, 0, 1]]);
+  assert.strictEqual(b.teams[i], 1);
+  B.apply(b, { tool: 'undo', ref: 1 }, 2);
+  assert.strictEqual(b.fb.data[i], 3);
+  assert.strictEqual(b.teams[i], 0);
+  B.apply(b, { tool: 'redo', ref: 1 }, 3);
+  assert.strictEqual(b.fb.data[i], 3);
+  assert.strictEqual(b.teams[i], 1);
+});
+
+test('same-colour bucket fill can claim and undo team ownership', () => {
+  const b = B.create(5, 5, 0);
+  assert(!B.apply(b, { tool: 'fill', pts: [[2, 2]], c: 3, f: 0, tm: 0 }, 0).error);
+  const claim = B.apply(b, { tool: 'fill', pts: [[2, 2]], c: 3, f: 0, tm: 1 }, 1);
+  assert.strictEqual(claim.changes.length, 25);
+  assert(Array.from(b.teams).every(team => team === 1));
+  assert.strictEqual(b.fb.data[0], 3);
+  assert(!B.apply(b, { tool: 'undo', ref: 1 }, 2).error);
+  assert(Array.from(b.teams).every(team => team === 0));
 });
 
 test('undo of a line removes the whole line', () => {

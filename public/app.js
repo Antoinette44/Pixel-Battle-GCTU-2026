@@ -25,6 +25,7 @@
   /* ---------------- state ---------------- */
   let SIZE = 128;
   let fb = Raster.createFB(SIZE, SIZE, BG);
+  let pixelTeams = new Int8Array(SIZE * SIZE).fill(-1);
   let tool = 'pen', pts = [], colour = 16, myTeam = hasSavedTeam ? parsedTeam : 0;
   let readyAt = 0, cooldownMs = 5000, connected = false, seq = 0, ws = null, retry = 500, scores = TEAMS.map(() => 0);
   let zonesOn = true;                   // server tells us whether team-zone restriction is enforced
@@ -58,6 +59,7 @@
     for (const id of ['base', 'prev']) { $(id).width = n; $(id).height = n; $(id).style.width = n + 'px'; $(id).style.height = n + 'px'; }
     $('world').style.width = n + 'px'; $('world').style.height = n + 'px';
     fb = Raster.createFB(n, n, BG);
+    pixelTeams = new Int8Array(n * n).fill(-1);
     baseImg = baseCtx.createImageData(n, n); prevImg = prevCtx.createImageData(n, n);
     buildZones();
     fitView();
@@ -356,12 +358,13 @@
     const plot = (x, y) => { if (Raster.inBounds(fb, x, y)) plotRGBA(prevImg, x, y, rgb, 210); };
     setMsg('');
     if (a) {
-      const r = Raster.rasterize(fb, a);
+      const r = Raster.rasterize(fb, a, true);
       if (r.error) setMsg(r.error);
       else {
         let n = 0, outside = 0;
-        for (const i of r.idx) if (fb.data[i] !== a.c) {
-          plot(i % SIZE, (i / SIZE) | 0); n++;
+        for (const i of r.idx) if (fb.data[i] !== a.c || pixelTeams[i] !== myTeam) {
+          if (fb.data[i] !== a.c) plot(i % SIZE, (i / SIZE) | 0);
+          n++;
           if (zonesOn && Board.zoneTeam(SIZE, i % SIZE, (i / SIZE) | 0) !== myTeam) outside++;
         }
         if (a.tool === 'fill' && zonesOn && !n && Board.zoneTeam(SIZE, a.pts[0][0], a.pts[0][1]) !== myTeam) setMsg('Tap inside your own team zone.');
@@ -495,6 +498,7 @@
       if (m.t === 'init') {
         if (m.size !== SIZE) setSize(m.size);
         for (let i = 0; i < m.grid.length; i++) fb.data[i] = parseInt(m.grid[i], 36);
+        for (let i = 0; i < m.teams.length; i++) pixelTeams[i] = parseInt(m.teams[i], 36) - 1;
         renderAll(); scores = m.scores; renderScores();
         cooldownMs = m.cooldown; readyAt = Date.now() + m.wait;
         $('online').textContent = m.online; $('actions').textContent = m.actions; undoLeft = m.undo || 0; redoLeft = m.redo || 0;
@@ -503,7 +507,11 @@
         applyChallenge(m.ch);
         setStatus(true, 'live'); updatePreview(); maybeStartTour();
       } else if (m.t === 'px') {
-        m.idx.forEach((i, k) => { const col = m.cols ? m.cols[k] : m.c; Raster.setPixel(fb, i % SIZE, (i / SIZE) | 0, col); paintIndex(i, col); });
+        m.idx.forEach((i, k) => {
+          const col = m.cols ? m.cols[k] : m.c;
+          Raster.setPixel(fb, i % SIZE, (i / SIZE) | 0, col); paintIndex(i, col);
+          pixelTeams[i] = m.teams[k];
+        });
         baseCtx.putImageData(baseImg, 0, 0);
         scores = m.sc; renderScores();
         $('actions').textContent = m.n + 1;
@@ -512,7 +520,7 @@
         $('online').textContent = m.n;
       } else if (m.t === 'reset') {
         // new battle: drop everything local that belonged to the old one (the 'init' that follows carries the blank canvas)
-        pts = []; undoLeft = 0; redoLeft = 0;      // (seq is NOT reset: the server rejects out-of-order sequence numbers)
+        pts = []; undoLeft = 0; redoLeft = 0; pixelTeams.fill(-1);      // (seq is NOT reset: the server rejects out-of-order sequence numbers)
         rpStop(); rp.log = []; rpReset(); rpDraw();
         $('rpSeek').max = 0; $('rpSeek').disabled = true; $('rpPlay').disabled = true; $('rpRec').disabled = true;
         $('rpInfo').textContent = 'A new battle started - load the log to replay it.';
@@ -560,7 +568,7 @@
     const left = ch.state === 'running' ? Math.max(0, ch.endAt - performance.now()) : 0;
     const txt = ch.state === 'running' ? fmt(left) : ch.state === 'ended' ? '00:00' : '--:--';
     $('chTime').textContent = txt; $('timerHead').textContent = txt;
-    $('chState').textContent = ch.state === 'running' ? 'Challenge running - most team-colour pixels wins' :
+    $('chState').textContent = ch.state === 'running' ? 'Challenge running - most team-owned pixels wins' :
       ch.state === 'ended' ? 'Challenge over' : 'Waiting for the host to start the challenge (warm-up drawing is allowed)';
     const bar = $('chbar');
     bar.classList.toggle('running', ch.state === 'running'); bar.classList.toggle('ended', ch.state === 'ended');
@@ -575,7 +583,7 @@
     $('resBadge').style.background = hex; $('resBadge').textContent = draw ? '=' : TEAM_WORD[w[0]][0];
     $('resTitle').textContent = draw ? 'It is a draw!' : `${TEAMS[w[0]].name} win!`;
     $('resTitle').style.color = hex;
-    $('resSub').textContent = draw ? `Tied: ${w.map(i => TEAMS[i].name).join(' & ')} with ${f[w[0]]} pixel${f[w[0]] === 1 ? '' : 's'} each.` : `${f[w[0]]} pixel${f[w[0]] === 1 ? '' : 's'} in their team colour.`;
+    $('resSub').textContent = draw ? `Tied: ${w.map(i => TEAMS[i].name).join(' & ')} with ${f[w[0]]} owned pixel${f[w[0]] === 1 ? '' : 's'} each.` : `${f[w[0]]} pixel${f[w[0]] === 1 ? '' : 's'} owned by ${TEAMS[w[0]].name}.`;
     $('resScores').innerHTML = TEAMS.map((t) => `<div class="${w.includes(t.id) ? 'win' : ''}" style="border-color:${COLOURS[t.colour].hex}"><span>${t.name}</span><span>${f[t.id]}</span></div>`).join('');
     $('result').classList.remove('hidden');
   }
@@ -751,7 +759,7 @@
     { target: '#tools', title: 'Drawing tools', text: 'Choose Pen, Line, Circle, Polygon or Paint Bucket. The pen also supports connected drag strokes.' },
     { target: '#palette', title: '16-color palette', text: 'Select a color here. Its HSB, RGB and HEX values are shown just below the palette.' },
     { target: '#cooldown', title: 'Five-second cooldown', text: 'Each drawing action starts a five-second countdown. The bar and disabled controls show when you can draw again.' },
-    { target: '#score', title: 'Live team scoreboard', text: 'Each score counts the pixels currently owned by that team color, including replacements.' },
+    { target: '#score', title: 'Live team scoreboard', text: 'Each score counts pixels owned by that team, whatever drawing colour was used, including replacements.' },
   ];
   let tourStep = 0, tourTarget = null, autoTourOpened = false;
   function positionTour() {

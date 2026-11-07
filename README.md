@@ -34,7 +34,7 @@ The HTTP server binds to `0.0.0.0`; the browser chooses `ws://` or `wss://` from
 | 2 | Pen, line (Bresenham), circle (midpoint), polygon (scan-line), bucket (queue flood fill) | `raster.js: bresenham, midpointCircle/circle, fillPolygon, floodFill`. Pen pointer strokes join sampled points with Bresenham; DDA is included too (Algorithm lab). |
 | 3 | Real-time sync, new player gets the canvas | `server.js` broadcasts every action; the `init` message sends the whole grid on join and on reconnect. |
 | 4 | 16-colour HSB palette + team colours | `palette.js` (hand-written HSB<->RGB). The UI shows H, S, B, RGB and HEX for the selected colour and in the "Palette sheet" table. Colours 16-19 are team colours. |
-| 5 | Cooldown + live team scoreboard | Cooldown is enforced on the **server** per player id (5 s). The scoreboard counts pixels of each team colour, updated on every change. |
+| 5 | Cooldown + live team scoreboard | Cooldown is enforced on the **server** per player id (5 s). Every pixel stores its drawing colour and owning team separately; the scoreboard counts team ownership, updated on every change. |
 | 6 | Time-lapse replay from a stored action log | Every action is appended to `DATA_DIR/actions.ndjson` (`./data/actions.ndjson` by default). The Replay section loads `/api/log` and re-runs the same rasterizers; speed control, scrubber, video recording. |
 | 7 | Touch + laptop, 15+ players tested | Pointer events: pen drag = connected stroke; other one-finger drags pan; pinch / wheel = zoom. `tools/loadtest.js` simulates N players. |
 | + | Stretch | Zoom/pan viewport, export PNG, replay recorded as .webm video, **undo/redo your own actions** (buttons, Ctrl+Z and Ctrl+Shift+Z / Ctrl+Y). |
@@ -46,8 +46,10 @@ The HTTP server binds to `0.0.0.0`; the browser chooses `ws://` or `wss://` from
   preserves later multiplayer edits. New drawings clear that player's redo history. Undo/redo actions have a 0.5 s anti-spam gap and do
   not refund the drawing cooldown.
 * Undo and redo are written to the action log as `{tool:'undo'|'redo', ref:n}`, and replay uses the same `board.js`, so the time-lapse
-  always equals the live canvas. Score changes are calculated only for pixels that actually change.
+  always equals the live canvas. Score changes follow actual pixel ownership transitions.
 * The log stores a short one-way hash of the player id (`u`), never the secret id, so undo/redo history survives a server restart.
+* Pixel ownership is separate from its palette colour. Repainting a pixel with the same visible colour can transfer ownership, and
+  undo/redo restore both the colour and team that owned each affected pixel.
 
 ### Design decisions you should be able to explain
 * **The server is the authority.** Clients send an *action* (`tool + points + colour`), not pixels. The server runs the same

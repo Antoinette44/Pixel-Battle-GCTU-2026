@@ -29,12 +29,11 @@ const MAX_LOG_LINE_BYTES = 16 * 1024;
 /* ---------------- state ---------------- */
 let board = B.create(SIZE, SIZE, P.BG);          // frame buffer + pixel owners + undo/redo history (public/board.js)
 let log = [];                                   // action log (used for the time-lapse); undo and redo are logged too
-let scores = P.TEAMS.map(() => 0);              // pixels per team colour
+let scores = P.TEAMS.map(() => 0);              // pixels owned by each team, regardless of drawing colour
 let mine = new Map();                           // player key -> log positions of that player's drawings (for undo)
 let redone = new Map();                         // player key -> drawings currently available to redo
 let storageError = null;
 
-const colourToTeam = new Map(P.TEAMS.map(t => [t.colour, t.id]));
 const nextAllowed = new Map();                  // player id -> time the next action is allowed
 const nextUndo = new Map();                     // player id -> time the next undo is allowed (anti-spam)
 const UNDO_GAP_MS = 500;
@@ -54,11 +53,11 @@ const chInfo = () => ({ t: 'ch', state: ch.state, dur: ch.durMs, rem: remainingM
 // without revealing the secret id that the player uses to identify themselves.
 const playerKey = (id) => crypto.createHash('sha256').update(id).digest('hex').slice(0, 12);
 
-// changes = [[index, oldColour, newColour], ...]
+// changes = [[index, oldColour, newColour, oldTeam, newTeam], ...]
 function countChanges(changes) {
-  for (const [, oldC, newC] of changes) {
-    if (colourToTeam.has(oldC)) scores[colourToTeam.get(oldC)]--;
-    if (colourToTeam.has(newC)) scores[colourToTeam.get(newC)]++;
+  for (const [, , , oldTeam, newTeam] of changes) {
+    if (oldTeam >= 0) scores[oldTeam]--;
+    if (newTeam >= 0) scores[newTeam]++;
   }
 }
 
@@ -273,7 +272,8 @@ const onlineCount = () => { let n = 0; for (const c of wss.clients) if (c.player
 function sendInit(ws) {
   const wait = Math.max(0, (nextAllowed.get(ws.player.id) || 0) - Date.now());
   const key = playerKey(ws.player.id);
-  send(ws, { t: 'init', size: SIZE, grid: gridString(), scores, online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length, undo: undoable(key), redo: redoable(key), team: ws.player.team, zones: ZONES, ch: chInfo() });
+  const teams = Array.from(board.teams, team => (team + 1).toString(36)).join('');
+  send(ws, { t: 'init', size: SIZE, grid: gridString(), teams, scores, online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length, undo: undoable(key), redo: redoable(key), team: ws.player.team, zones: ZONES, ch: chInfo() });
 }
 
 let resetting = false;                           // guard: two resets can never overlap
@@ -396,11 +396,11 @@ wss.on('connection', (ws, req) => {
         }
       }
       // Dry run: rasterize() only works out WHICH pixels would change (it writes nothing), so we can refuse first.
-      const dry = R.rasterize(board.fb, a);
+      const dry = R.rasterize(board.fb, a, true);
       if (dry.error) return send(ws, { t: 'rej', seq: m.seq, reason: dry.error, wait: 0 });
       if (ZONES && a.tool !== 'fill' && dry.idx.some(i => B.zoneTeam(SIZE, i % SIZE, (i / SIZE) | 0) !== team))
         return send(ws, { t: 'rej', seq: m.seq, reason: 'You can only draw inside your own team zone', wait: 0 });
-      if (!dry.idx.some(i => board.fb.data[i] !== a.c)) return send(ws, { t: 'rej', seq: m.seq, reason: 'Nothing would change', wait: 0 });
+      if (!dry.idx.some(i => board.fb.data[i] !== a.c || board.teams[i] !== team)) return send(ws, { t: 'rej', seq: m.seq, reason: 'Nothing would change', wait: 0 });
 
       const n = log.length, key = playerKey(ws.player.id);
       const entry = { n, ts: now, p: ws.player.name, u: key, tm: ws.player.team, tool: a.tool, pts: a.pts, c: a.c, f: a.f };
@@ -418,7 +418,7 @@ wss.on('connection', (ws, req) => {
       log.push(entry); track(entry, n);
 
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: a.tool, c: a.c,
-                  idx: res.changes.map(ch => ch[0]), sc: scores });
+                  idx: res.changes.map(ch => ch[0]), teams: res.changes.map(ch => ch[4]), sc: scores });
       send(ws, { t: 'ok', seq: m.seq, wait: COOLDOWN_MS, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
       return;
     }
@@ -445,7 +445,7 @@ wss.on('connection', (ws, req) => {
 
       // every restored pixel can have a different colour, so send one colour per pixel
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'undo',
-                  idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), sc: scores });
+                  idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), teams: res.changes.map(ch => ch[4]), sc: scores });
       send(ws, { t: 'undone', seq: m.seq, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
       return;
     }
@@ -470,7 +470,7 @@ wss.on('connection', (ws, req) => {
       countChanges(res.changes);
       log.push(entry); track(entry, n);
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'redo',
-                  idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), sc: scores });
+                  idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), teams: res.changes.map(ch => ch[4]), sc: scores });
       send(ws, { t: 'redone', seq: m.seq, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
     }
   });
