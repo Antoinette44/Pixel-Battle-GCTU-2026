@@ -7,10 +7,12 @@ joins one of four teams and paints on a shared **128 x 128** canvas. All shapes 
 ## Run it
 
 ```bash
-npm install          # installs the only dependency: ws
+npm ci               # installs the locked runtime dependency: ws
 npm start            # http://localhost:3000   (also prints the Wi-Fi address, e.g. http://192.168.1.20:3000)
-npm test             # unit tests: Week 2 worked examples + undo (public/board.js)
+npm test             # raster, board, live WebSocket, reset and challenge tests
 npm run test:server  # end-to-end test: starts the real server and real websocket clients
+npm run test:reset   # reset, archive and replay behavior
+npm run test:challenge # zone, scoring and server challenge timer behavior
 npm run test:browser # real Chromium test (needs: pip install playwright && playwright install chromium)
 npm run demo         # starts the server with a saved battle loaded, to show the replay any time
 ```
@@ -18,10 +20,11 @@ npm run demo         # starts the server with a saved battle loaded, to show the
 Phones on the same Wi-Fi open the "on the Wi-Fi" address printed in the terminal.
 For the online class activity, deploy to Render / Railway (see below) and share the public link.
 
-Options (environment variables): `PORT`, `COOLDOWN_MS` (default 5000), `CANVAS_SIZE` (default 128),
-`DATA_DIR` (action log folder), `ADMIN_KEY` (enables `/admin/reset?key=...` to wipe the battle before the show).
+Options (environment variables): `PORT` (default 3000), `COOLDOWN_MS` (default 5000),
+`CANVAS_SIZE` (default 128), `DATA_DIR` (default `./data`), and `ADMIN_KEY` (required for remote host controls).
+The HTTP server binds to `0.0.0.0`; the browser chooses `ws://` or `wss://` from the page protocol.
 
-**Team zones and challenge timer.** The canvas is split into four quadrants (Red top-left, Blue top-right, Green bottom-left, Gold bottom-right); the server only accepts drawing inside the player's own zone (`ZONES=0` turns this off). The host opens `http://localhost:3000/?host` (add `&key=ADMIN_KEY` when `ADMIN_KEY` is set; without a key only the host machine itself is accepted), sets the minutes (default 5, or `CHALLENGE_SECS`) and presses *Start challenge*. Starting archives the old log and clears the canvas. `GET /admin/start?key=...&secs=300` does the same. Tests: `npm run test:challenge`.
+**Team zones and challenge timer.** The canvas is split into four quadrants (Red top-left, Blue top-right, Green bottom-left, Gold bottom-right); the server only accepts drawing inside the player's own zone (`ZONES=0` turns this off). Open `/?host`, enter `ADMIN_KEY` in the host panel, set the minutes (default 5, or `CHALLENGE_SECS`) and press *Start challenge*. On a local server with no `ADMIN_KEY`, host controls are limited to local connections. Admin commands are authenticated over the WebSocket; HTTP GET reset/start endpoints are intentionally disabled so keys are not exposed in URLs. Starting archives the old log and clears the canvas. Tests: `npm run test:challenge`.
 
 ## How it meets the brief
 
@@ -32,7 +35,7 @@ Options (environment variables): `PORT`, `COOLDOWN_MS` (default 5000), `CANVAS_S
 | 3 | Real-time sync, new player gets the canvas | `server.js` broadcasts every action; the `init` message sends the whole grid on join and on reconnect. |
 | 4 | 16-colour HSB palette + team colours | `palette.js` (hand-written HSB<->RGB). The UI shows H, S, B, RGB and HEX for the selected colour and in the "Palette sheet" table. Colours 16-19 are team colours. |
 | 5 | Cooldown + live team scoreboard | Cooldown is enforced on the **server** per player id (5 s). The scoreboard counts pixels of each team colour, updated on every change. |
-| 6 | Time-lapse replay from a stored action log | Every action is appended to `data/actions.ndjson`. The Replay section loads `/api/log` and re-runs the same rasterizers; speed control, scrubber, video recording. |
+| 6 | Time-lapse replay from a stored action log | Every action is appended to `DATA_DIR/actions.ndjson` (`./data/actions.ndjson` by default). The Replay section loads `/api/log` and re-runs the same rasterizers; speed control, scrubber, video recording. |
 | 7 | Touch + laptop, 15+ players tested | Pointer events: pen drag = connected stroke; other one-finger drags pan; pinch / wheel = zoom. `tools/loadtest.js` simulates N players. |
 | + | Stretch | Zoom/pan viewport, export PNG, replay recorded as .webm video, **undo your own actions** (button or Ctrl+Z). |
 
@@ -46,7 +49,7 @@ Options (environment variables): `PORT`, `COOLDOWN_MS` (default 5000), `CANVAS_S
 
 ### Design decisions you should be able to explain
 * **The server is the authority.** Clients send an *action* (`tool + points + colour`), not pixels. The server runs the same
-  `raster.js`, so cheating is impossible and the log is tiny. The same function replays the log, so replay = live result.
+  `raster.js`, validates the resulting pixels and team-zone limits, and records the action. The same function replays the log, so replay = live result.
 * **Limits keep the battle fair:** max 700 pixels per shape, circle radius <= 20, polygon <= 8 corners,
   bucket region <= 1500 pixels (one bucket cannot wipe the canvas). Change them in `LIMITS` at the top of `raster.js`.
 * **Action ordering:** drawing and undo messages require strictly increasing per-connection sequence numbers; duplicate and out-of-order requests are rejected.
@@ -66,13 +69,14 @@ It reports broadcast latency (p50/p95/max) and checks that every bot's canvas eq
 Our run (25 bots, 20 s, same machine, ~20% of turns are undo): p95 latency 3 ms, 25/25 canvases identical.
 **Repeat it on the real class Wi-Fi with real phones and put your own numbers in the report.**
 
-## Deploy for the online class activity (free)
+## Deploy to Render
 
 1. Push this repo to GitHub.
-2. Render.com -> New -> Blueprint -> pick the repo (`render.yaml` is included), or New -> Web Service with Build `npm install`, Start `npm start`.
-3. Share the `https://....onrender.com` link (WebSockets work over `wss://` automatically).
-Free hosts sleep when idle (open the link a minute before class) and may erase `data/` on restart.
-**Keep the real battle:** `URL=https://<your-app>.onrender.com npm run backup-log` saves the log to `samples/`; commit it to Git.
+2. In Render, create a Blueprint from the repository. `render.yaml` creates **one** Node Web Service, runs `npm ci` / `npm start`, generates `ADMIN_KEY`, and mounts a 1 GB persistent disk at `/var/data`.
+3. This disk-backed Blueprint uses Render's paid `starter` instance plan; persistent disks are not available on the free plan. If deploying manually, attach a persistent disk, set `DATA_DIR=/var/data`, and use the same path for its mount point. Do not treat Render's default filesystem as persistent.
+4. Share the `https://....onrender.com` link. The frontend connects to the same service over `wss://` automatically. To operate host controls, open `https://....onrender.com/?host` and enter the generated `ADMIN_KEY` (available in the Render service's environment settings). Never put the key in a URL.
+
+Locally, the action log remains in `data/actions.ndjson`. On Render, all active and archived logs are stored under the mounted disk. Reset archives the old battle and atomically replaces the active log, so a restart replays only the current battle. The `/health` endpoint reports a failing status if action-log storage becomes unavailable. Optional exports can still be downloaded with `URL=https://<your-app>.onrender.com npm run backup-log`.
 
 ## Files
 
@@ -87,8 +91,7 @@ public/lab.html      Algorithm lab: step tables for DDA / Bresenham / midpoint (
 tests/*.test.js      unit + server tests   tests/browser_test.py  real-browser test
 tools/loadtest.js    load test             tools/backup-log.js, demo.js, make-demo-log.js   keep / replay a battle
 samples/             saved battle logs (sample-small = test players, demo-battle = SYNTHETIC demo, add your real one)
-render.yaml          free deploy on Render     docs/  GIT_PLAN, TEST_SHEET, REPORT_DRAFT, DIARY, screenshots/
-docs/DELIVERABLES.md templates: report outline, build diary, contribution table, AI declaration, video script
+render.yaml          single-service Render Blueprint with persistent action-log disk
 ```
 
 ## Git
@@ -98,4 +101,3 @@ git init && git add . && git commit -m "Initial project skeleton"
 git remote add origin <your GitHub/GitLab URL> && git push -u origin main
 ```
 Every member commits under their own name (`git config user.name` / `user.email`), in different weeks.
-

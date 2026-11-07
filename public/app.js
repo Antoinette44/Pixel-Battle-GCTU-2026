@@ -527,7 +527,7 @@
   const qs = new URLSearchParams(location.search);
   if (qs.has('host')) {
     $('hostBox').classList.remove('hidden');
-    if (qs.get('key')) $('hostKey').value = qs.get('key'); else $('hostKey').classList.remove('hidden');
+    $('hostKey').classList.remove('hidden');
   }
   const hostSend = (cmd) => {
     if (!connected) return toast('Not connected');

@@ -38,9 +38,9 @@ const readLog = () => fs.readFileSync(path.join(dir, 'actions.ndjson'), 'utf8').
     // 12. unauthorised player cannot reset
     a.admin('reset'); assert.strictEqual((await a.next('adm')).ok, false);
     a.admin('reset', 'wrong-key'); assert.strictEqual((await a.next('adm')).ok, false);
-    assert.strictEqual((await get('/admin/reset')).status, 403); assert.strictEqual((await get('/admin/reset?key=nope')).status, 403);
+    assert.strictEqual((await get('/admin/reset')).status, 404); assert.strictEqual((await get('/admin/reset?key=nope')).status, 404);
     assert.strictEqual(readLog().length, 3); assert.notStrictEqual((await client('Chk', 0)).init.grid, BLANK);
-    ok('12. players with no/wrong key (websocket and HTTP) cannot reset; canvas and log untouched');
+    ok('12. players with no/wrong key cannot reset; HTTP reset requests are disabled and canvas/log stay untouched');
 
     // reset by the admin
     for (const c of [a, b, before]) c.msgs.length = 0;
@@ -95,6 +95,25 @@ const readLog = () => fs.readFileSync(path.join(dir, 'actions.ndjson'), 'utf8').
     const rb = B.create(128, 128, 0); lg.forEach((e, n) => assert(!B.apply(rb, e, n).error));
     assert.strictEqual(Array.from(rb.fb.data, v => v.toString(36)).join(''), after.init.grid);
     ok('10. replaying /api/log gives exactly the new battle starting at action 0');
-    console.log('\nreset tests passed'); srv.kill(); process.exit(0);
+
+    const activeLog = path.join(dir, 'actions.ndjson');
+    const validLine = fs.readFileSync(activeLog, 'utf8');
+    after.ws.close(); srv.kill(); await sleep(500);
+    fs.appendFileSync(activeLog, '{damaged log line}\n' + validLine);
+    srv = start(); await sleep(700);
+    const paused = await client('Paused', 0);
+    assert.strictEqual((await get('/health')).status, 503);
+    paused.act({ tool: 'pen', pts: [[40, 40]], c: red, f: 0 });
+    assert.match((await paused.next('rej')).reason, /storage is unavailable/i);
+    paused.msgs.length = 0;
+    paused.admin('reset', KEY);
+    assert.strictEqual((await paused.next('adm')).ok, true);
+    await paused.next('reset');
+    const cleared = await paused.next('init');
+    assert.strictEqual(cleared.grid, BLANK);
+    assert.strictEqual(fs.readFileSync(activeLog, 'utf8'), '');
+    assert.strictEqual((await get('/health')).status, 200);
+    ok('invalid logs pause play until an authenticated reset clears the active history');
+    console.log('\nreset tests passed'); paused.ws.close(); srv.kill(); process.exit(0);
   } catch (e) { console.error('FAIL', e); srv.kill(); process.exit(1); }
 })();

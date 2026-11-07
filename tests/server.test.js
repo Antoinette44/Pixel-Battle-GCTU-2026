@@ -2,12 +2,19 @@
    scoreboard and that a restart rebuilds the same canvas from the log.   Run with: npm run test:server */
 const assert = require('assert');
 const { spawn, spawnSync } = require('child_process');
-const fs = require('fs'), os = require('os'), path = require('path');
+const fs = require('fs'), os = require('os'), path = require('path'), http = require('http');
 const WebSocket = require('ws');
 const P = require('../public/palette.js');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pb-'));
 const PORT = 3200 + Math.floor(Math.random() * 500);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const get = (p) => new Promise((resolve, reject) => {
+  http.get(`http://localhost:${PORT}${p}`, (res) => {
+    let body = '';
+    res.on('data', chunk => body += chunk);
+    res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
+  }).on('error', reject);
+});
 
 const tooSmall = spawnSync(process.execPath, [path.join(__dirname, '..', 'server.js')], {
   env: { ...process.env, PORT, DATA_DIR: dir, CANVAS_SIZE: '64' }, encoding: 'utf8', timeout: 5000,
@@ -37,6 +44,45 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
 (async () => {
   let srv = startServer(); await sleep(700);
   try {
+    const home = await get('/');
+    assert.strictEqual(home.status, 200);
+    assert.match(home.body, /src="app\.js"/);
+    assert.strictEqual((await get('/raster.js')).status, 200);
+    assert.strictEqual((await get('/health')).status, 200);
+    assert.strictEqual((await get('/admin/reset')).status, 404);
+    console.log('  ok  frontend assets and health endpoint are served; HTTP reset is disabled');
+
+    const originRejected = await new Promise((resolve) => {
+      const ws = new WebSocket('ws://localhost:' + PORT, { origin: 'https://other.example' });
+      ws.once('open', () => resolve(false));
+      ws.once('error', () => resolve(true));
+    });
+    assert.strictEqual(originRejected, true, 'cross-origin browser WebSocket requests must be refused');
+    console.log('  ok  cross-origin browser WebSocket requests are refused');
+
+    const duplicateHelloCode = await new Promise((resolve) => {
+      const ws = new WebSocket('ws://localhost:' + PORT);
+      const timeout = setTimeout(() => { ws.terminate(); resolve(null); }, 2000);
+      ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', id: 'first-player-id-123', name: 'First', team: 0 })));
+      ws.on('message', (d) => {
+        if (JSON.parse(d).t === 'init') ws.send(JSON.stringify({ t: 'hello', id: 'second-player-id-123', name: 'Second', team: 1 }));
+      });
+      ws.once('close', (code) => { clearTimeout(timeout); resolve(code); });
+    });
+    assert.strictEqual(duplicateHelloCode, 1008, 'a connection cannot change its player identity after hello');
+    console.log('  ok  repeated hello cannot switch player identities');
+
+    const closeCodeForMessage = (payload) => new Promise((resolve) => {
+      const ws = new WebSocket('ws://localhost:' + PORT);
+      const timeout = setTimeout(() => { ws.terminate(); resolve(null); }, 2000);
+      ws.once('open', () => ws.send(payload));
+      ws.once('close', (code) => { clearTimeout(timeout); resolve(code); });
+      ws.on('error', () => {});
+    });
+    assert.strictEqual(await closeCodeForMessage('{'), 1003, 'invalid JSON must be rejected');
+    assert.strictEqual(await closeCodeForMessage('x'.repeat(8193)), 1009, 'oversized messages must be rejected');
+    console.log('  ok  malformed and oversized WebSocket messages are closed');
+
     const a = await client('Ann', 0), b = await client('Ben', 1);
     const red = P.TEAMS[0].colour, blue = P.TEAMS[1].colour;
 
@@ -94,7 +140,7 @@ const recount = (grid) => P.TEAMS.map(t => [...grid].filter(ch => parseInt(ch, 3
 
     // the logged undo entries must replay to the same picture in the browser code
     const B = require('../public/board.js');
-    const log = JSON.parse(await new Promise((res) => require('http').get(`http://localhost:${PORT}/api/log`, r => { let s = ''; r.on('data', d => s += d); r.on('end', () => res(s)); }))).log;
+    const log = JSON.parse((await get('/api/log')).body).log;
     const rb = B.create(128, 128, 0); log.forEach((e, n) => assert(!B.apply(rb, e, n).error));
     assert.strictEqual(Array.from(rb.fb.data, v => v.toString(36)).join(''), after.grid);
     assert(log.some(e => e.tool === 'undo'));

@@ -2,7 +2,7 @@
    * Serves the web app from /public
    * Keeps the authoritative frame buffer, the action log and the scoreboard
    * Enforces the per-player cooldown and broadcasts every change in real time.
-   Run:  npm install && npm start      (default http://localhost:3000)             */
+   Run:  npm ci && npm start      (default port 3000)                               */
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -12,22 +12,26 @@ const R = require('./public/raster.js');
 const B = require('./public/board.js');
 const P = require('./public/palette.js');
 
-const PORT = +process.env.PORT || 3000;
+const PORT = process.env.PORT === undefined ? 3000 : Number(process.env.PORT);
 const SIZE = process.env.CANVAS_SIZE === undefined ? 128 : Number(process.env.CANVAS_SIZE);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new RangeError('PORT must be an integer between 1 and 65535');
 if (!Number.isSafeInteger(SIZE) || SIZE < 128) throw new RangeError('CANVAS_SIZE must be an integer of at least 128');
-const COOLDOWN_MS = process.env.COOLDOWN_MS !== undefined ? +process.env.COOLDOWN_MS : 5000;
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const COOLDOWN_MS = process.env.COOLDOWN_MS === undefined ? 5000 : Number(process.env.COOLDOWN_MS);
+if (!Number.isSafeInteger(COOLDOWN_MS) || COOLDOWN_MS < 0) throw new RangeError('COOLDOWN_MS must be a non-negative integer');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const ZONES = process.env.ZONES !== '0';                                  // players may only draw in their own team zone
 const CHALLENGE_SECS = +process.env.CHALLENGE_SECS > 0 ? +process.env.CHALLENGE_SECS : 300;   // default 5 minutes
 const MIN_CHALLENGE_SECS = 5, MAX_CHALLENGE_SECS = 3600;
 const LOG_FILE = path.join(DATA_DIR, 'actions.ndjson');
+const MAX_LOG_LINE_BYTES = 16 * 1024;
 
 /* ---------------- state ---------------- */
 let board = B.create(SIZE, SIZE, P.BG);          // frame buffer + pixel owners + undo history (public/board.js)
 let log = [];                                   // action log (used for the time-lapse); undo is logged too
 let scores = P.TEAMS.map(() => 0);              // pixels per team colour
 let mine = new Map();                           // player key -> log positions of that player's drawings (for undo)
+let storageError = null;
 
 const colourToTeam = new Map(P.TEAMS.map(t => [t.colour, t.id]));
 const nextAllowed = new Map();                  // player id -> time the next action is allowed
@@ -69,26 +73,73 @@ const undoable = (key) => (mine.get(key) || []).length;
 
 function loadLog() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(LOG_FILE)) return;
+  if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, '');
   for (const line of fs.readFileSync(LOG_FILE, 'utf8').split('\n')) {
     if (!line.trim()) continue;
     try {
-      const e = JSON.parse(line);
+      if (Buffer.byteLength(line) > MAX_LOG_LINE_BYTES) throw new Error('line exceeds the size limit');
+      const raw = JSON.parse(line);
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('entry must be an object');
+      if (raw.n !== undefined && raw.n !== log.length) throw new Error('unexpected action index');
+      const e = { n: log.length, ts: Number.isFinite(raw.ts) ? raw.ts : Date.now(),
+        p: typeof raw.p === 'string' ? raw.p.slice(0, 16) : 'Player',
+        u: typeof raw.u === 'string' ? raw.u.slice(0, 64) : '',
+        tm: Number.isInteger(raw.tm) && raw.tm >= 0 && raw.tm < P.TEAMS.length ? raw.tm : 0,
+        tool: raw.tool };
+      if (raw.tool === 'undo') {
+        if (!Number.isSafeInteger(raw.ref) || raw.ref < 0 || raw.ref >= log.length) throw new Error('invalid undo reference');
+        e.ref = raw.ref;
+      } else {
+        const v = R.normalise(raw, board.fb, P.NUM);
+        if (v.error) throw new Error(v.error);
+        Object.assign(e, v.action);
+        if (raw.clip !== undefined) {
+          if (raw.tool !== 'fill' || !Array.isArray(raw.clip) || raw.clip.length !== 4 ||
+              !raw.clip.every(Number.isInteger) || raw.clip[0] < 0 || raw.clip[1] < 0 ||
+              raw.clip[2] >= SIZE || raw.clip[3] >= SIZE || raw.clip[0] > raw.clip[2] || raw.clip[1] > raw.clip[3])
+            throw new Error('invalid fill clip');
+          e.clip = raw.clip;
+        }
+      }
       const n = log.length;
       const res = B.apply(board, e, n);          // same code path as live play => identical canvas
-      if (res.error) continue;
+      if (res.error) throw new Error(res.error);
       countChanges(res.changes);
-      e.n = n;
       log.push(e);
       track(e, n);
-    } catch (_) { /* skip a damaged line */ }
+    } catch (e) {
+      storageError = e;
+      console.error(`Action log is invalid at entry ${log.length}: ${e.message}; drawing is paused until the host resets the battle`);
+      break;
+    }
   }
   console.log(`Loaded ${log.length} actions from ${LOG_FILE}`);
 }
 loadLog();
-// Log lines are appended SYNCHRONOUSLY. Node runs one handler at a time, so an action can never be written half-way
-// through a reset: it lands either in the old battle's file or in the new one, never in the wrong one.
-const appendLog = (entry) => fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
+// Log lines are appended synchronously. A failed write is truncated to its starting offset and pauses play.
+function appendEntry(entry) {
+  let offset;
+  try {
+    offset = fs.statSync(LOG_FILE).size;
+    fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n');
+    return { offset };
+  } catch (error) {
+    if (Number.isSafeInteger(offset)) {
+      try { fs.truncateSync(LOG_FILE, offset); }
+      catch (truncateError) { console.error('Could not roll back a partial action-log write:', truncateError.message); }
+    }
+    storageError = error;
+    console.error('Action-log write failed; drawing and undo are paused:', error.message);
+    return { error };
+  }
+}
+function rollbackEntry(offset) {
+  try { fs.truncateSync(LOG_FILE, offset); }
+  catch (error) {
+    storageError = error;
+    console.error('Could not roll back an invalid action-log entry:', error.message);
+  }
+}
 
 const gridString = () => Array.from(board.fb.data, v => v.toString(36)).join('');
 
@@ -126,48 +177,74 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
                '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.json': 'application/json' };
 const PUBLIC = path.join(__dirname, 'public');
 
+const securityHeaders = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://x');
+  let url;
+  try { url = new URL(req.url, 'http://x'); }
+  catch (_) {
+    res.writeHead(400, securityHeaders);
+    return res.end('bad request');
+  }
+  const headers = { ...securityHeaders };
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { ...headers, Allow: 'GET, HEAD' });
+    return res.end('method not allowed');
+  }
   if (url.pathname === '/api/log') {
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({ size: SIZE, log }));
+    res.writeHead(200, { ...headers, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(req.method === 'HEAD' ? undefined : JSON.stringify({ size: SIZE, log }));
   }
-  if (url.pathname === '/health') { res.writeHead(200); return res.end('ok'); }
-  if (url.pathname === '/admin/start') {
-    if (!isAdmin(url.searchParams.get('key'), req)) { res.writeHead(403); return res.end('forbidden'); }
-    const r = startChallenge(url.searchParams.get('secs'));
-    if (!r.ok) { res.writeHead(500); return res.end(r.error); }
-    res.writeHead(200); return res.end('challenge started');
+  if (url.pathname === '/health') {
+    res.writeHead(storageError ? 503 : 200, headers);
+    return res.end(req.method === 'HEAD' ? undefined : storageError ? 'storage unavailable' : 'ok');
   }
-  if (url.pathname === '/admin/reset') {
-    if (!ADMIN_KEY || !isAdmin(url.searchParams.get('key'), req)) { res.writeHead(403); return res.end('forbidden'); }
-    const r = resetBattle();
-    if (!r.ok) { res.writeHead(500); return res.end(r.error); }
-    res.writeHead(200); return res.end('battle reset');
+  if (url.pathname === '/admin/start' || url.pathname === '/admin/reset') {
+    res.writeHead(404, headers);
+    return res.end('not found');
   }
-  let rel = decodeURIComponent(url.pathname);
+  let rel;
+  try { rel = decodeURIComponent(url.pathname); }
+  catch (_) {
+    res.writeHead(400, headers);
+    return res.end('bad request');
+  }
   if (rel === '/') rel = '/index.html';
-  const file = path.normalize(path.join(PUBLIC, rel));
+  const file = path.resolve(PUBLIC, `.${rel}`);
   const relativePath = path.relative(PUBLIC, file);
   if (
-    relativePath.startsWith('..') ||
+    relativePath === '..' ||
+    relativePath.startsWith(`..${path.sep}`) ||
     path.isAbsolute(relativePath)
   ) {
-    res.writeHead(403);
+    res.writeHead(403, headers);
     return res.end('forbidden');
   }
   fs.readFile(file, (err, buf) => {
-    if (err) { res.writeHead(404); return res.end('not found'); }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
-    res.end(buf);
+    if (err) { res.writeHead(404, headers); return res.end('not found'); }
+    res.writeHead(200, { ...headers, 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.end(req.method === 'HEAD' ? undefined : buf);
   });
 });
 
 /* ---------------- WebSocket ---------------- */
-const wss = new WebSocketServer({ server, maxPayload: 8192 });
+const wss = new WebSocketServer({
+  server,
+  maxPayload: 8192,
+  verifyClient: ({ origin, req }) => {
+    if (!origin) return true; // Non-browser clients (tests and tools) do not send Origin.
+    try { return new URL(origin).host.toLowerCase() === String(req.headers.host || '').toLowerCase(); }
+    catch (_) { return false; }
+  },
+});
 
 const send = (ws, obj) => { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); };
-const broadcast = (obj) => { const s = JSON.stringify(obj); for (const c of wss.clients) if (c.readyState === 1 && c.player) c.send(s); };
+const broadcast = (obj) => {
+  const s = JSON.stringify(obj);
+  for (const c of wss.clients) if (c.readyState === 1 && c.player) {
+    if (c.bufferedAmount > 1024 * 1024) c.terminate();
+    else c.send(s);
+  }
+};
 const onlineCount = () => { let n = 0; for (const c of wss.clients) if (c.player && c.readyState === 1) n++; return n; };
 
 function sendInit(ws) {
@@ -181,20 +258,33 @@ let resetting = false;                           // guard: two resets can never 
 function resetBattle() {
   if (resetting) return { ok: false, error: 'A reset is already in progress' };
   resetting = true;
+  let tempFile;
   try {
     try {
       if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 0) {
-        const archive = path.join(DATA_DIR, `actions-${Date.now()}.ndjson`);    // old battle is kept as a backup, never replayed
-        fs.renameSync(LOG_FILE, archive);
+        let stamp = Date.now();
+        let archive = path.join(DATA_DIR, `actions-${stamp}.ndjson`);
+        while (fs.existsSync(archive)) archive = path.join(DATA_DIR, `actions-${++stamp}.ndjson`);
+        fs.copyFileSync(LOG_FILE, archive, fs.constants.COPYFILE_EXCL);
       }
-      fs.writeFileSync(LOG_FILE, '');                                          // fresh, empty log for the new battle
+      tempFile = path.join(DATA_DIR, `actions-reset-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
+      fs.writeFileSync(tempFile, '', { flag: 'wx' });
+      fs.renameSync(tempFile, LOG_FILE);                                      // atomically replace the active battle history
+      tempFile = null;
     } catch (e) {
       console.error('Reset failed (log file):', e.message);
       return { ok: false, error: 'Could not clear the action log: ' + e.message };
     }
+    storageError = null;
     doReset();
     return { ok: true };
-  } finally { resetting = false; }
+  } finally {
+    if (tempFile) {
+      try { fs.unlinkSync(tempFile); }
+      catch (error) { if (error.code !== 'ENOENT') console.error('Could not remove reset temp file:', error.message); }
+    }
+    resetting = false;
+  }
 }
 function doReset() {
   board = B.create(SIZE, SIZE, P.BG);
@@ -209,7 +299,7 @@ function doReset() {
   for (const c of wss.clients) if (c.player) sendInit(c);   // ... then send the blank canvas, zero scores, own team + cooldown
 }
 
-const cleanName = (s) => String(s || '').replace(/[^\p{L}\p{N} _.-]/gu, '').trim().slice(0, 16) || 'Player';
+const cleanName = (s) => (typeof s === 'string' ? s : '').replace(/[^\p{L}\p{N} _.-]/gu, '').trim().slice(0, 16) || 'Player';
 
 wss.on('connection', (ws, req) => {
   ws.player = null;
@@ -219,11 +309,13 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (data) => {
     let m;
-    try { m = JSON.parse(data); } catch (_) { return; }
-    if (!m || typeof m !== 'object') return;
+    try { m = JSON.parse(data); }
+    catch (_) { ws.close(1003, 'Messages must be valid JSON'); return; }
+    if (!m || typeof m !== 'object' || Array.isArray(m)) { ws.close(1008, 'Invalid message'); return; }
 
     if (m.t === 'hello') {
-      if (typeof m.id !== 'string' || !/^[\w-]{8,64}$/.test(m.id)) return;
+      if (ws.player) { ws.close(1008, 'Player identity is already established'); return; }
+      if (typeof m.id !== 'string' || !/^[\w-]{8,64}$/.test(m.id)) { ws.close(1008, 'Invalid player identity'); return; }
       const asked = Number.isInteger(m.team) && m.team >= 0 && m.team < P.TEAMS.length ? m.team : 0;
       const team = teamOf.has(m.id) ? teamOf.get(m.id) : asked;   // a returning player keeps the team the server knows
       teamOf.set(m.id, team);
@@ -252,6 +344,8 @@ wss.on('connection', (ws, req) => {
       }
       ws.lastSeq = m.seq;
     }
+    if ((m.t === 'act' || m.t === 'undo') && storageError)
+      return send(ws, { t: 'rej', seq: m.seq, reason: 'Action storage is unavailable; ask the host to reset or restart the service', wait: 0 });
 
     if (m.t === 'team') {
       const ok = Number.isInteger(m.team) && m.team >= 0 && m.team < P.TEAMS.length;
@@ -286,13 +380,17 @@ wss.on('connection', (ws, req) => {
       const n = log.length, key = playerKey(ws.player.id);
       const entry = { n, ts: now, p: ws.player.name, u: key, tm: ws.player.team, tool: a.tool, pts: a.pts, c: a.c, f: a.f };
       if (a.clip) entry.clip = a.clip;                 // logged so the replay fills exactly the same pixels
+      const saved = appendEntry(entry);
+      if (saved.error) return send(ws, { t: 'rej', seq: m.seq, reason: 'Could not save this action; drawing is paused until storage is repaired', wait: 0 });
       const res = B.apply(board, entry, n);
-      if (res.error) return send(ws, { t: 'rej', seq: m.seq, reason: res.error, wait: 0 });
+      if (res.error) {
+        rollbackEntry(saved.offset);
+        return send(ws, { t: 'rej', seq: m.seq, reason: res.error, wait: 0 });
+      }
 
       nextAllowed.set(ws.player.id, now + COOLDOWN_MS);
       countChanges(res.changes);
       log.push(entry); track(entry, n);
-      appendLog(entry);
 
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: a.tool, c: a.c,
                   idx: res.changes.map(ch => ch[0]), sc: scores });
@@ -309,12 +407,16 @@ wss.on('connection', (ws, req) => {
 
       const n = log.length;
       const entry = { n, ts: now, p: ws.player.name, u: key, tm: ws.player.team, tool: 'undo', ref: list[list.length - 1] };
+      const saved = appendEntry(entry);
+      if (saved.error) return send(ws, { t: 'rej', seq: m.seq, reason: 'Could not save this undo; drawing is paused until storage is repaired', wait: 0 });
       const res = B.apply(board, entry, n);
-      if (res.error) return send(ws, { t: 'rej', seq: m.seq, reason: res.error, wait: 0 });
+      if (res.error) {
+        rollbackEntry(saved.offset);
+        return send(ws, { t: 'rej', seq: m.seq, reason: res.error, wait: 0 });
+      }
 
       countChanges(res.changes);
       log.push(entry); track(entry, n);
-      appendLog(entry);
 
       // every restored pixel can have a different colour, so send one colour per pixel
       broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'undo',
@@ -324,11 +426,11 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => { if (ws.player) broadcast({ t: 'online', n: onlineCount() }); });
-  ws.on('error', () => {});
+  ws.on('error', (error) => console.warn('WebSocket error:', error.message));
 });
 
 // drop dead connections (phones that left the Wi-Fi)
-setInterval(() => {
+const heartbeat = setInterval(() => {
   for (const ws of wss.clients) {
     if (!ws.alive) { ws.terminate(); continue; }
     ws.alive = false; ws.ping();
@@ -336,7 +438,42 @@ setInterval(() => {
 }, 30000);
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Pixel Battle running on http://localhost:${PORT}  (canvas ${SIZE}x${SIZE}, cooldown ${COOLDOWN_MS} ms)`);
-  const nets = require('os').networkInterfaces();
-  for (const list of Object.values(nets)) for (const n of list) if (n.family === 'IPv4' && !n.internal) console.log(`  on the Wi-Fi:  http://${n.address}:${PORT}`);
+  console.log(`Pixel Battle listening on port ${PORT}  (canvas ${SIZE}x${SIZE}, cooldown ${COOLDOWN_MS} ms)`);
+  console.log(`Action log directory: ${DATA_DIR}`);
+  if (process.env.NODE_ENV !== 'production') {
+    const nets = require('os').networkInterfaces();
+    for (const list of Object.values(nets)) for (const n of list) if (n.family === 'IPv4' && !n.internal) console.log(`  on the Wi-Fi:  http://${n.address}:${PORT}`);
+  }
 });
+
+server.on('error', (error) => {
+  console.error('HTTP server error:', error.message);
+  process.exitCode = 1;
+  clearInterval(heartbeat);
+  clearTimeout(chTimer);
+  clearInterval(chTick);
+});
+
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}; shutting down`);
+  clearInterval(heartbeat);
+  clearTimeout(chTimer);
+  clearInterval(chTick);
+  for (const ws of wss.clients) ws.close(1001, 'Server shutting down');
+  server.close((error) => {
+    if (error) {
+      console.error('HTTP server shutdown error:', error.message);
+      process.exitCode = 1;
+    } else console.log('Server shutdown complete');
+  });
+  const forceClose = setTimeout(() => {
+    for (const ws of wss.clients) ws.terminate();
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+  }, 10000);
+  forceClose.unref();
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

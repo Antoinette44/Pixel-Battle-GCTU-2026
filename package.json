@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/raster.test.js && node tests/board.test.js",
+    "test": "node tests/raster.test.js && node tests/board.test.js && node tests/server.test.js && node tests/reset.test.js && node tests/challenge.test.js",
     "loadtest": "node tools/loadtest.js",
     "test:server": "node tests/server.test.js",
     "test:challenge": "node tests/challenge.test.js",

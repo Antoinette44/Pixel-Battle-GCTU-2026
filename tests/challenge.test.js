@@ -16,6 +16,7 @@ function client(name, team, id) {
     ws.on('message', (d) => { const m = JSON.parse(d); c.msgs.push(m); if (m.t === 'init') { c.init = m; resolve(c); } });
     c.next = async (t, pred = () => true) => { for (let i = 0; i < 150; i++) { const k = c.msgs.findIndex(m => m.t === t && pred(m)); if (k >= 0) return c.msgs.splice(k, 1)[0]; await sleep(20); } throw new Error('timeout waiting for ' + t); };
     c.act = (o) => ws.send(JSON.stringify({ t: 'act', seq: ++c.seq, ...o }));
+    c.admin = (cmd, secs) => ws.send(JSON.stringify({ t: 'admin', cmd, secs }));
   });
 }
 const ok = (s) => console.log('  ok  ' + s);
@@ -51,8 +52,8 @@ const ok = (s) => console.log('  ok  ' + s);
     assert.strictEqual(s1[0], 1 + 40 /* 1 pen pixel + 4 walls sharing corners */ - 0 + 0 - 0 === s1[0] ? s1[0] : s1[0]); assert.strictEqual(s1[1] + s1[2] + s1[3], 0); ok('palette colours are not scored');
     // ---- timer ----
     b.msgs.length = 0;
-    const r = await new Promise(res => require('http').get(`http://localhost:${PORT}/admin/start?secs=5`, x => res(x.statusCode)));
-    assert.strictEqual(r, 200); // localhost host, no ADMIN_KEY
+    b.admin('start', 5);
+    assert.strictEqual((await b.next('adm')).ok, true); // localhost host, no ADMIN_KEY
     const start = await b.next('ch', m => m.state === 'running'); assert(start.rem > 4000 && start.rem <= 5000); ok('host (localhost) started a 5 s challenge; every client got the same server time: ' + start.rem + ' ms');
     const a3 = await client('Late', 2);
     assert(a3.init.ch.state === 'running' && a3.init.ch.rem <= start.rem); ok('a late joiner gets the remaining time and a blank canvas');
@@ -74,7 +75,8 @@ const ok = (s) => console.log('  ok  ' + s);
     b.ws.send(JSON.stringify({ t: 'undo', seq: 99 })); assert.match((await b.next('rej')).reason, /over/); ok('undo is refused after the end');
     // ---- draw ----
     b.msgs.length = 0;
-    await new Promise(res => require('http').get(`http://localhost:${PORT}/admin/start?secs=5`, x => res(x.statusCode)));
+    b.admin('start', 5);
+    assert.strictEqual((await b.next('adm')).ok, true);
     const e2 = await b.next('ch', m => m.state === 'running'); assert(e2.rem > 0);
     await sleep(5300);
     const e3 = await b.next('ch', m => m.state === 'ended'); assert.strictEqual(e3.winners.length, 4); ok('0-0-0-0 is announced as a draw (all 4 teams tied)');
