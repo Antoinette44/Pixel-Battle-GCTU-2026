@@ -94,14 +94,16 @@
 
 <main>
   <div id="viewcol">
-    <!-- dedicated viewport: fixed size, overflow hidden - zooming/panning only moves the board inside it -->
+    <!-- dedicated viewport: native scrolling is enabled only when the zoomed board is larger than the screen -->
     <div id="stage">
-      <div id="world">
-        <canvas id="base" width="128" height="128"></canvas>
-        <canvas id="prev" width="128" height="128"></canvas>
-        <div id="zones" aria-hidden="true"></div>
-        <div id="hover"></div>
-        <div id="marks"></div>
+      <div id="canvasScrollSpace">
+        <div id="world">
+          <canvas id="base" width="128" height="128"></canvas>
+          <canvas id="prev" width="128" height="128"></canvas>
+          <div id="zones" aria-hidden="true"></div>
+          <div id="hover"></div>
+          <div id="marks"></div>
+        </div>
       </div>
       <!-- pixel grid + zone dividers: a screen-space overlay drawn with our own pixel writes; it is never part of the frame buffer -->
       <canvas id="gridc" aria-hidden="true"></canvas>

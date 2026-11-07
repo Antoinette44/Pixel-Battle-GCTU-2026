@@ -12,7 +12,7 @@ const R = require('./public/raster.js');
 const B = require('./public/board.js');
 const P = require('./public/palette.js');
 
-const PORT = process.env.PORT === undefined ? 3000 : Number(process.env.PORT);
+const PORT = process.env.PORT === undefined ? 4000 : Number(process.env.PORT);
 const SIZE = process.env.CANVAS_SIZE === undefined ? 128 : Number(process.env.CANVAS_SIZE);
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new RangeError('PORT must be an integer between 1 and 65535');
 if (!Number.isSafeInteger(SIZE) || SIZE < 128) throw new RangeError('CANVAS_SIZE must be an integer of at least 128');
@@ -237,6 +237,15 @@ const wss = new WebSocketServer({
   },
 });
 
+wss.on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`Cannot start Pixel Battle: port ${PORT} is already in use.`);
+    console.error(`Stop the existing server or set PORT to a different port.`);
+  } else {
+    console.error('WebSocket server error:', error.message);
+  }
+});
+
 const send = (ws, obj) => { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); };
 const broadcast = (obj) => {
   const s = JSON.stringify(obj);
@@ -445,35 +454,3 @@ server.listen(PORT, '0.0.0.0', () => {
     for (const list of Object.values(nets)) for (const n of list) if (n.family === 'IPv4' && !n.internal) console.log(`  on the Wi-Fi:  http://${n.address}:${PORT}`);
   }
 });
-
-server.on('error', (error) => {
-  console.error('HTTP server error:', error.message);
-  process.exitCode = 1;
-  clearInterval(heartbeat);
-  clearTimeout(chTimer);
-  clearInterval(chTick);
-});
-
-let shuttingDown = false;
-function shutdown(signal) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log(`Received ${signal}; shutting down`);
-  clearInterval(heartbeat);
-  clearTimeout(chTimer);
-  clearInterval(chTick);
-  for (const ws of wss.clients) ws.close(1001, 'Server shutting down');
-  server.close((error) => {
-    if (error) {
-      console.error('HTTP server shutdown error:', error.message);
-      process.exitCode = 1;
-    } else console.log('Server shutdown complete');
-  });
-  const forceClose = setTimeout(() => {
-    for (const ws of wss.clients) ws.terminate();
-    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
-  }, 10000);
-  forceClose.unref();
-}
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));

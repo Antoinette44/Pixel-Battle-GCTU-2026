@@ -97,7 +97,12 @@
     const W = Math.max(1, Math.round(stage.clientWidth * dpr)), H = Math.max(1, Math.round(stage.clientHeight * dpr));
     if (gridCv.width !== W || gridCv.height !== H || !gridImg) { gridCv.width = W; gridCv.height = H; gridImg = gridCtx.createImageData(W, H); }
     const px = new Uint32Array(gridImg.data.buffer); px.fill(0);
-    const cell = z * dpr, ox = tx * dpr, oy = ty * dpr, span = SIZE * cell;
+    const sr = stage.getBoundingClientRect();
+    const wr = world.getBoundingClientRect();
+    const cell = z * dpr;
+    const ox = (wr.left - sr.left - stage.clientLeft) * dpr;
+    const oy = (wr.top - sr.top - stage.clientTop) * dpr;
+    const span = SIZE * cell;
     const xa = Math.max(0, Math.round(ox)), xb = Math.min(W, Math.round(ox + span));
     const ya = Math.max(0, Math.round(oy)), yb = Math.min(H, Math.round(oy + span));
     const vline = (sx, w, col) => { for (let x = sx; x < sx + w; x++) if (x >= 0 && x < W) for (let y = ya; y < yb; y++) px[y * W + x] = col; };
@@ -123,6 +128,7 @@
   let z = 4, tx = 0, ty = 0;
   let fitZ = 4, minZ = 1;                   // zoom that fits the whole board / smallest allowed zoom
   let fitted = true;                        // true while the user has not zoomed away from "Fit"
+  const canvasScrollSpace = $('canvasScrollSpace');
   const viewSize = () => ({ w: stage.clientWidth, h: stage.clientHeight });
 
   function computeFit() {
@@ -133,12 +139,26 @@
   // Keep the board centred when it is smaller than the viewport; when it is larger, stop it being dragged away.
   function clampView() {
     const { w, h } = viewSize(), bw = SIZE * z;
-    tx = bw <= w ? (w - bw) / 2 : Math.min(PAN_SLACK, Math.max(w - bw - PAN_SLACK, tx));
-    ty = bw <= h ? (h - bw) / 2 : Math.min(PAN_SLACK, Math.max(h - bw - PAN_SLACK, ty));
+    canvasScrollSpace.style.width = `${Math.max(w, bw)}px`;
+    canvasScrollSpace.style.height = `${Math.max(h, bw)}px`;
+    const left = bw <= w ? (w - bw) / 2 : 0;
+    const top = bw <= h ? (h - bw) / 2 : 0;
+    world.style.left = `${left}px`;
+    world.style.top = `${top}px`;
+    tx = stage.scrollLeft;
+    ty = stage.scrollTop;
   }
-  const applyView = () => {
+  const applyView = (focus = null) => {
     clampView();
-    world.style.transform = `translate(${tx}px, ${ty}px) scale(${z})`;
+    world.style.transform = `scale(${z})`;
+    if (focus) {
+      const bw = SIZE * z;
+      const left = bw <= viewSize().w ? (viewSize().w - bw) / 2 : 0;
+      const top = bw <= viewSize().h ? (viewSize().h - bw) / 2 : 0;
+      stage.scrollLeft = left + focus.bx * z - focus.cx;
+      stage.scrollTop = top + focus.by * z - focus.cy;
+    }
+    stage.classList.toggle('can-pan', z > fitZ + 1e-6);
     $('zones').style.setProperty('--zline', `${Math.max(0.12, 2 / z)}px`);
     requestGrid();
     $('zpct').textContent = Math.round(z / fitZ * 100) + '%';           // 100% = "Fit"
@@ -149,15 +169,23 @@
   function fitView() {
     computeFit();
     z = fitZ; tx = 0; ty = 0; fitted = true;
+    stage.scrollLeft = 0;
+    stage.scrollTop = 0;
     applyView();                                                         // clampView() centres it
   }
   function zoomAt(cx, cy, factor) {
     const nz = Math.min(MAX_Z, Math.max(minZ, z * factor));
     if (nz === z) return;
-    const k = nz / z;
-    tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k; z = nz;            // keep the point under (cx, cy) fixed
+    const r = world.getBoundingClientRect();
+    const sr = stage.getBoundingClientRect();
+    const clientX = sr.left + stage.clientLeft + cx;
+    const clientY = sr.top + stage.clientTop + cy;
+    const bx = r.width ? (clientX - r.left) / r.width * SIZE : 0;
+    const by = r.height ? (clientY - r.top) / r.height * SIZE : 0;
+    z = nz;                                                                  // keep the point under the pointer fixed
+    const focus = { bx, by, cx, cy };
     fitted = Math.abs(z - fitZ) < 1e-6;
-    applyView();
+    applyView(focus);
   }
   // Screen position -> board pixel. Uses the board's REAL on-screen rectangle (after zoom + pan)
   // and its logical size, so it is correct at every zoom level, for mouse and touch alike.
@@ -176,10 +204,18 @@
   }
   if (window.ResizeObserver) new ResizeObserver(onViewportResize).observe(stage);
   else window.addEventListener('resize', onViewportResize);
+  stage.addEventListener('scroll', () => { tx = stage.scrollLeft; ty = stage.scrollTop; requestGrid(); }, { passive: true });
   stage.addEventListener('wheel', (e) => {
     e.preventDefault();
     const r = stage.getBoundingClientRect();
-    zoomAt(e.clientX - r.left - stage.clientLeft, e.clientY - r.top - stage.clientTop, Math.exp(-e.deltaY * 0.0015));
+    const cx = e.clientX - r.left - stage.clientLeft;
+    const cy = e.clientY - r.top - stage.clientTop;
+    if (e.ctrlKey || e.metaKey || z <= fitZ + 1e-6) {
+      zoomAt(cx, cy, Math.exp(-e.deltaY * 0.0015));
+    } else {
+      stage.scrollLeft += e.deltaX || (e.shiftKey ? e.deltaY : 0);
+      stage.scrollTop += e.shiftKey ? 0 : e.deltaY;
+    }
   }, { passive: false });
 
   // Pen drags make a connected stroke; other one-finger drags pan. Two fingers pinch and pan.
@@ -193,7 +229,7 @@
   stage.addEventListener('pointerdown', (e) => {
     stage.setPointerCapture(e.pointerId);
     const [x, y] = toPixel(e.clientX, e.clientY);
-    const drawing = tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
+    const drawing = e.pointerType !== 'mouse' && tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, drawing, points: drawing ? [[x, y]] : [] });
     if (ptrs.size === 1) moved = false;
     else {
@@ -214,13 +250,20 @@
         return;
       }
       if (!moved && Math.hypot(e.clientX - p.sx, e.clientY - p.sy) > 6) moved = true;
-      if (moved) { stage.classList.add('panning'); tx += e.clientX - p.x; ty += e.clientY - p.y; applyView(); }
+      if (moved) {
+        stage.classList.add('panning');
+        stage.scrollLeft -= e.clientX - p.x;
+        stage.scrollTop -= e.clientY - p.y;
+        tx = stage.scrollLeft; ty = stage.scrollTop;
+        requestGrid();
+      }
       p.x = e.clientX; p.y = e.clientY;
     } else if (ptrs.size === 2) {
       p.x = e.clientX; p.y = e.clientY;
       const cur = pinchInfo();
       zoomAt(cur.mx, cur.my, cur.d / pinchLast.d);
-      tx += cur.mx - pinchLast.mx; ty += cur.my - pinchLast.my; applyView();
+      stage.scrollLeft -= cur.mx - pinchLast.mx;
+      stage.scrollTop -= cur.my - pinchLast.my;
       pinchLast = cur;
     }
   });
