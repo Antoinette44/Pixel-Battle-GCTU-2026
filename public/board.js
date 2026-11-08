@@ -15,6 +15,7 @@
   function create(w, h, bg) {
     return {
       fb: Raster.createFB(w, h, bg),
+      bg,
       owner: new Int32Array(w * h).fill(-1),   // log position of the action that last painted the pixel (-1 = nobody)
       teams: new Int8Array(w * h).fill(-1),    // team that owns each pixel; independent of its drawing colour
       hist: new Map(),                         // log position -> { before: [[index, oldColour, oldOwner, oldTeam], ...], undone }
@@ -69,17 +70,19 @@
     const res = Raster.rasterize(fb, entry, true);
     if (res.error) return res;
     const changes = [], before = [];
-    const team = Number.isInteger(entry.tm) && entry.tm >= 0 && entry.tm < 4 ? entry.tm : -1;
+    const erasing = entry.tool === 'eraser';
+    const colour = erasing ? board.bg : entry.c;
+    const team = erasing ? -1 : Number.isInteger(entry.tm) && entry.tm >= 0 && entry.tm < 4 ? entry.tm : -1;
     for (const i of res.idx) {
       const old = fb.data[i], oldTeam = teams[i];
-      if (old === entry.c && oldTeam === team) continue;
+      if (old === colour && oldTeam === team) continue;
       before.push([i, old, owner[i], oldTeam]);
-      changes.push([i, old, entry.c, oldTeam, team]);
-      if (old !== entry.c) Raster.setPixel(fb, i % fb.w, (i / fb.w) | 0, entry.c);
+      changes.push([i, old, colour, oldTeam, team]);
+      if (old !== colour) Raster.setPixel(fb, i % fb.w, (i / fb.w) | 0, colour);
       owner[i] = n;
       teams[i] = team;
     }
-    if (before.length) hist.set(n, { before, undone: false, colour: entry.c, team });
+    if (before.length) hist.set(n, { before, undone: false, colour, team });
     return { changes };
   }
 

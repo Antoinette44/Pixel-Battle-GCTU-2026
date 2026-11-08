@@ -1,4 +1,4 @@
-"""Browser test (real Chromium via Playwright): join flow, all 5 tools, undo, replay == live canvas, phone touch.
+"""Browser test (real Chromium via Playwright): join flow, drawing tools, eraser mouse/touch, undo, and replay.
 Setup once:  pip install playwright && playwright install chromium
 Run:         python3 tests/browser_test.py        (also refreshes docs/screenshots/ for the report)"""
 import subprocess, time, os, tempfile, json, urllib.request
@@ -81,6 +81,18 @@ with sync_playwright() as p:
     pg.screenshot(path=S+'05_polygon_preview.png'); place(pg)
     # bucket: recolour inside the filled circle
     tool(pg,'fill'); pg.click('#palette button[data-i="4"]'); tap(pg,40,50); place(pg)
+    # eraser mouse drag removes one isolated stroke and leaves a nearby stroke untouched
+    tool(pg,'line'); pg.click('#palette button[data-i="18"]'); tap(pg,10,55); tap(pg,30,55); place(pg)
+    tool(pg,'line'); pg.click('#palette button[data-i="19"]'); tap(pg,10,45); tap(pg,30,45); place(pg)
+    tool(pg,'eraser')
+    x0,y0=center(pg,10,55); x1,y1=center(pg,30,55)
+    pg.mouse.move(x0,y0); pg.mouse.down(); pg.mouse.move(x1,y1,steps=8); pg.mouse.up()
+    place(pg)
+    sample=pg.evaluate("""()=>{const c=document.getElementById('base').getContext('2d');
+      const rgb=(x,y)=>Array.from(c.getImageData(x,y,1,1).data.slice(0,3));
+      return {erased:rgb(20,55),kept:rgb(20,45),bg:Palette.COLOURS[Palette.BG].rgb,
+        keptColour:Palette.COLOURS[19].rgb}}""")
+    assert sample['erased']==sample['bg'] and sample['kept']==sample['keptColour'], 'mouse eraser must clear only its dragged stroke'
     # another circle outline, then undo it
     tool(pg,'circle'); pg.uncheck('#filled'); pg.click('#palette button[data-i="10"]'); tap(pg,90,25); tap(pg,100,25); place(pg)
     pg.screenshot(path=S+'06_all_tools.png')
@@ -119,8 +131,22 @@ with sync_playwright() as p:
     ctx=b.new_context(viewport={'width':390,'height':844},is_mobile=True,has_touch=True,device_scale_factor=2)
     ph=ctx.new_page(); hook(ph,'phone'); join(ph,'Yaw',2)
     ph.screenshot(path=S+'10_phone_game.png')
-    tool(ph,'line'); cx,cy=center(ph,20,110); ph.touchscreen.tap(cx,cy); cx,cy=center(ph,100,110); ph.touchscreen.tap(cx,cy)
-    place(ph); ph.screenshot(path=S+'11_phone_after_place.png')
+    tool(ph,'line'); ph.click('#palette button[data-i="17"]')
+    cx,cy=center(ph,20,110); ph.touchscreen.tap(cx,cy); cx,cy=center(ph,40,110); ph.touchscreen.tap(cx,cy)
+    place(ph)
+    tool(ph,'eraser')
+    x0,y0=center(ph,20,110); x1,y1=center(ph,40,110); cdp=ctx.new_cdp_session(ph)
+    touch=lambda x,y:{'x':x,'y':y,'id':1,'radiusX':3,'radiusY':3,'force':1}
+    cdp.send('Input.dispatchTouchEvent',{'type':'touchStart','touchPoints':[touch(x0,y0)]})
+    for step in range(1,9):
+        x=x0+(x1-x0)*step/8; y=y0+(y1-y0)*step/8
+        cdp.send('Input.dispatchTouchEvent',{'type':'touchMove','touchPoints':[touch(x,y)]})
+    cdp.send('Input.dispatchTouchEvent',{'type':'touchEnd','touchPoints':[]})
+    place(ph)
+    phone_pixel=ph.evaluate("""()=>{const c=document.getElementById('base').getContext('2d');
+      return {pixel:Array.from(c.getImageData(30,110,1,1).data.slice(0,3)),bg:Palette.COLOURS[Palette.BG].rgb}}""")
+    assert phone_pixel['pixel']==phone_pixel['bg'], 'touch-drag eraser must clear the shared stroke'
+    ph.screenshot(path=S+'11_phone_after_place.png')
     print('phone placed via touch OK; phone undo text:',ph.inner_text('#undoAction'))
     ow=ph.evaluate("document.documentElement.scrollWidth<=window.innerWidth+1"); print('phone: no sideways scroll:',ow)
     b.close()

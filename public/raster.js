@@ -143,14 +143,16 @@
   }
 
   /* ---------------- Actions ----------------
-     action = { tool: 'pen'|'line'|'dda'|'circle'|'polygon'|'fill', pts: [[x,y],...], c: colourIndex, f: 0|1 }
+     action = { tool: 'pen'|'line'|'dda'|'circle'|'polygon'|'fill'|'eraser', pts: [[x,y],...], c: colourIndex, f: 0|1 }
        pen     1..700 points (connected with Bresenham)
+       eraser  1..700 points (connected with Bresenham, fixed 5-pixel circular brush)
        line    2 points (start, end)
        dda     2 points (start, end)
        circle  2 points (centre, a point on the rim) ; f = 1 -> filled disc
        polygon 3..8 points (scan-line filled + Bresenham outline)
        fill    1 point (seed)                                                               */
-  const NEED = { pen: [1, LIMITS.maxPathPoints], line: [2, 2], dda: [2, 2], circle: [2, 2], polygon: [3, LIMITS.maxPoly], fill: [1, 1] };
+  const ERASER_RADIUS = 2;
+  const NEED = { pen: [1, LIMITS.maxPathPoints], eraser: [1, LIMITS.maxPathPoints], line: [2, 2], dda: [2, 2], circle: [2, 2], polygon: [3, LIMITS.maxPoly], fill: [1, 1] };
 
   // Checks a raw (untrusted) action and returns a clean copy, or { error }.
   function normalise(a, fb, numColours) {
@@ -166,7 +168,7 @@
       if (!inBounds(fb, p[0], p[1])) return { error: 'Point outside the canvas' };
       pts.push([p[0], p[1]]);
     }
-    return { action: { tool: a.tool, pts, c: a.c, f: a.f ? 1 : 0 } };
+    return { action: { tool: a.tool, pts, c: a.c, f: a.tool === 'eraser' ? 0 : a.f ? 1 : 0 } };
   }
 
   // Works out WHICH pixels an action touches (does not write). Returns { idx } or { error }.
@@ -185,6 +187,18 @@
         if (p.length === 1) plot(p[0][0], p[0][1]);
         else for (let i = 1; i < p.length; i++) bresenham(p[i - 1][0], p[i - 1][1], p[i][0], p[i][1], plot);
         break;
+      case 'eraser': {
+        const brush = (cx, cy) => {
+          for (let dy = -ERASER_RADIUS; dy <= ERASER_RADIUS; dy++)
+            for (let dx = -ERASER_RADIUS; dx <= ERASER_RADIUS; dx++)
+              if (dx * dx + dy * dy <= ERASER_RADIUS * ERASER_RADIUS) plot(cx + dx, cy + dy);
+        };
+        const path = (x, y) => bresenham(x, y, x, y, brush);
+        path(p[0][0], p[0][1]);
+        for (let i = 1; i < p.length; i++)
+          bresenham(p[i - 1][0], p[i - 1][1], p[i][0], p[i][1], path);
+        break;
+      }
       case 'line':
         bresenham(p[0][0], p[0][1], p[1][0], p[1][1], plot); break;
       case 'dda':
@@ -228,6 +242,6 @@
     return { changes };
   }
 
-  return { LIMITS, createFB, getPixel, setPixel, inBounds, dda, bresenham, midpointCircle, circle,
+  return { LIMITS, ERASER_RADIUS, createFB, getPixel, setPixel, inBounds, dda, bresenham, midpointCircle, circle,
            fillPolygon, floodFill, normalise, rasterize, applyAction };
 });

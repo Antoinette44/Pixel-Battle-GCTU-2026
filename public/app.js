@@ -13,6 +13,7 @@
     circle: '<circle cx="12" cy="12" r="8"/>',
     polygon: '<path d="m12 3 8 5-2 10-11 2-3-10z"/>',
     fill: '<path d="m4 15 8-8 8 8"/><path d="M6 17h12l-2 4H8z"/><path d="m12 3 2 2"/>',
+    eraser: '<path d="m7 21 10.5-10.5a3 3 0 0 0-4.2-4.2L3.8 16.8a3 3 0 0 0 0 4.2z"/><path d="m11 7 6 6"/><path d="M11 21h10"/>',
   };
   const icon = (name) => `<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
   const store = {
@@ -224,7 +225,7 @@
     }
   }, { passive: false });
 
-  // Pen drags make a connected stroke; other one-finger drags pan. Two fingers pinch and pan.
+  // Pen and eraser drags make connected strokes; other one-finger drags pan. Two fingers pinch and pan.
   const ptrs = new Map();
   let moved = false, pinchLast = null;
   const pinchInfo = () => {
@@ -237,11 +238,12 @@
     hoverAt(e.clientX, e.clientY);
     const [x, y] = toPixel(e.clientX, e.clientY);
     const drawing = !!tool && e.pointerType !== 'mouse' && tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
-    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, drawing, points: drawing ? [[x, y]] : [] });
+    const erasing = tool === 'eraser' && connected && !cooling() && Raster.inBounds(fb, x, y);
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, drawing, erasing, points: drawing || erasing ? [[x, y]] : [] });
     if (ptrs.size === 1) moved = false;
     else {
-      for (const p of ptrs.values()) p.drawing = false;
-      if (tool === 'pen') { pts = []; updatePreview(); }
+      for (const p of ptrs.values()) { p.drawing = false; p.erasing = false; }
+      if (tool === 'pen' || tool === 'eraser') { pts = []; updatePreview(); }
       moved = true; pinchLast = pinchInfo();
     }
   });
@@ -250,6 +252,17 @@
     const p = ptrs.get(e.pointerId);
     if (!p) return;
     if (ptrs.size === 1) {
+      if (p.erasing) {
+        const [x, y] = toPixel(e.clientX, e.clientY);
+        const last = p.points[p.points.length - 1];
+        if (Raster.inBounds(fb, x, y) && (x !== last[0] || y !== last[1]) &&
+            p.points.length < Raster.LIMITS.maxPathPoints) p.points.push([x, y]);
+        pts = p.points;
+        p.x = e.clientX; p.y = e.clientY;
+        moved = true;
+        updatePreview();
+        return;
+      }
       if (p.drawing) {
         const [x, y] = toPixel(e.clientX, e.clientY);
         const last = p.points[p.points.length - 1];
@@ -282,7 +295,19 @@
     const p = ptrs.get(e.pointerId);
     if (!p) return;
     const penStroke = p.drawing && e.type === 'pointerup';
-    const wasTap = !!tool && !p.drawing && ptrs.size === 1 && !moved && e.type === 'pointerup';
+    const wasTap = !!tool && !p.drawing && !p.erasing && ptrs.size === 1 && !moved && e.type === 'pointerup';
+    if (p.erasing) {
+      if (e.type === 'pointerup') {
+        const [x, y] = toPixel(e.clientX, e.clientY);
+        const last = p.points[p.points.length - 1];
+        if (Raster.inBounds(fb, x, y) && (x !== last[0] || y !== last[1]) &&
+            p.points.length < Raster.LIMITS.maxPathPoints) p.points.push([x, y]);
+        pts = p.points;
+      } else {
+        pts = [];
+      }
+      updatePreview();
+    }
     if (penStroke) {
       const [x, y] = toPixel(e.clientX, e.clientY);
       const last = p.points[p.points.length - 1];
@@ -302,11 +327,14 @@
   function hoverAt(cx, cy) {
     const [x, y] = toPixel(cx, cy);
     const h = $('hover');
+    h.classList.toggle('eraser', tool === 'eraser');
     if (Raster.inBounds(fb, x, y)) {
       const c = COLOURS[fb.data[y * SIZE + x]];
       $('coords').textContent = `x ${x}  y ${y}  ${c.name}`;
       if (tool) {
-        h.style.display = 'block'; h.style.left = x + 'px'; h.style.top = y + 'px';
+        h.style.display = 'block';
+        h.style.left = (tool === 'eraser' ? x - Raster.ERASER_RADIUS : x) + 'px';
+        h.style.top = (tool === 'eraser' ? y - Raster.ERASER_RADIUS : y) + 'px';
       } else h.style.display = 'none';
     } else {
       h.style.display = 'none';
@@ -321,6 +349,7 @@
     { id: 'circle',  label: 'Circle',  need: 2, hint: 'Tap the centre, then a point on the rim (midpoint circle).' },
     { id: 'polygon', label: 'Polygon', need: 3, hint: 'Tap 3 to 8 corners (scan-line fill).' },
     { id: 'fill',    label: 'Bucket',  need: 1, hint: 'Tap inside an area (queue flood fill).' },
+    { id: 'eraser',  label: 'Eraser',  need: 1, hint: 'Tap or drag to erase with a 5-pixel brush, then place the stroke.' },
   ];
   const toolDef = () => TOOLS.find(t => t.id === tool);
   const houseRunning = () => ch.mode === 'house' && ch.state === 'running';
@@ -331,7 +360,7 @@
     available.forEach((t) => {
       const b = document.createElement('button');
       b.innerHTML = `${icon(t.id)}<span>${t.label}</span>`;
-      const shortcut = t.id === 'dda' ? 6 : TOOLS.filter(item => item.id !== 'dda').indexOf(t) + 1;
+      const shortcut = t.id === 'dda' ? '6' : t.id === 'eraser' ? 'E' : TOOLS.filter(item => item.id !== 'dda' && item.id !== 'eraser').indexOf(t) + 1;
       b.title = `${t.label} (key ${shortcut})`; b.setAttribute('aria-label', `${t.label} (key ${shortcut})`);
       b.onclick = () => selectTool(t.id);
       b.dataset.id = t.id;
@@ -350,13 +379,14 @@
     $('fillOpt').classList.toggle('hidden', tool !== 'circle');
     $('undoPt').classList.toggle('hidden', tool !== 'polygon');
     stage.classList.toggle('drawing', !!tool);
+    $('hover').classList.toggle('eraser', tool === 'eraser');
     $('hint').textContent = toolDef()?.hint || 'Navigation mode - select a tool to start drawing.';
     updatePreview();
   }
 
   function tap(x, y) {
     if (!tool || !Raster.inBounds(fb, x, y)) return;
-    if (tool === 'pen' || tool === 'fill') pts = [[x, y]];
+    if (tool === 'pen' || tool === 'fill' || tool === 'eraser') pts = [[x, y]];
     else if (tool === 'line' || tool === 'circle') { if (pts.length === 0) pts = [[x, y]]; else pts = [pts[0], [x, y]]; }
     else if (tool === 'polygon') { if (pts.length < Raster.LIMITS.maxPoly) pts.push([x, y]); else toast('A polygon can have at most ' + Raster.LIMITS.maxPoly + ' corners'); }
     updatePreview();
@@ -365,7 +395,7 @@
   function buildAction() {
     if (!tool) return null;
     if (pts.length < toolDef().need) return null;
-    return { tool, pts: pts.map(p => [p[0], p[1]]), c: colour, f: $('filled').checked ? 1 : 0 };
+    return { tool, pts: pts.map(p => [p[0], p[1]]), c: tool === 'eraser' ? BG : colour, f: tool === 'eraser' ? 0 : $('filled').checked ? 1 : 0 };
   }
 
   let previewOK = false;
@@ -387,10 +417,16 @@
       if (r.error) setMsg(r.error);
       else {
         let n = 0, outside = 0;
-        for (const i of r.idx) if (fb.data[i] !== a.c || pixelTeams[i] !== myTeam) {
-          if (fb.data[i] !== a.c) plot(i % SIZE, (i / SIZE) | 0);
+        for (const i of r.idx) {
+          const changes = a.tool === 'eraser'
+            ? fb.data[i] !== BG || pixelTeams[i] !== -1
+            : fb.data[i] !== a.c || pixelTeams[i] !== myTeam;
+          if (a.tool === 'eraser' && zonesOn && Board.zoneTeam(SIZE, i % SIZE, (i / SIZE) | 0) !== myTeam) outside++;
+          if (!changes) continue;
+          if (a.tool === 'eraser') plotRGBA(prevImg, i % SIZE, (i / SIZE) | 0, [190, 50, 50], 150);
+          else if (fb.data[i] !== a.c) plot(i % SIZE, (i / SIZE) | 0);
           n++;
-          if (zonesOn && Board.zoneTeam(SIZE, i % SIZE, (i / SIZE) | 0) !== myTeam) outside++;
+          if (a.tool !== 'eraser' && zonesOn && Board.zoneTeam(SIZE, i % SIZE, (i / SIZE) | 0) !== myTeam) outside++;
         }
         if (a.tool === 'fill' && zonesOn && !n && Board.zoneTeam(SIZE, a.pts[0][0], a.pts[0][1]) !== myTeam) setMsg('Tap inside your own team zone.');
         else if (outside) setMsg('Stay inside your team zone (' + TEAMS[myTeam].name + ').');
@@ -418,7 +454,7 @@
     $('redoAction').textContent = redoLeft > 0 ? `Redo (${redoLeft})` : 'Redo';
   }
 
-  $('cancel').onclick = () => { pts = []; updatePreview(); };
+  const cancelAction = () => { pts = []; updatePreview(); };
   $('undoPt').onclick = () => { pts.pop(); updatePreview(); };
   $('undoAction').onclick = () => {
     if (!connected || undoLeft < 1) return;
@@ -443,7 +479,8 @@
     if (e.key >= '1' && e.key <= '5') selectTool(TOOLS.filter(t => t.id !== 'dda')[+e.key - 1].id);
     else if (e.key === '6' && houseRunning()) selectTool('dda');
     else if (e.key === 'Enter') place();
-    else if (e.key === 'Escape') $('cancel').onclick();
+    else if (e.key.toLowerCase() === 'e') selectTool('eraser');
+    else if (e.key === 'Escape') cancelAction();
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       e.preventDefault();
       if (e.shiftKey) $('redoAction').onclick();

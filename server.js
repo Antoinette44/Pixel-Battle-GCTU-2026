@@ -509,6 +509,7 @@ wss.on('connection', (ws, req) => {
       const v = R.normalise(m, board.fb, P.NUM);
       if (v.error) return send(ws, { t: 'rej', seq: m.seq, reason: v.error, wait: 0 });
       const a = v.action;
+      if (a.tool === 'eraser') a.c = P.BG;
       const team = ws.player.team;
       if (ZONES) {
         // The bucket fill is CLIPPED to the player's zone (and must start inside it); every other tool must stay inside.
@@ -522,7 +523,10 @@ wss.on('connection', (ws, req) => {
       if (dry.error) return send(ws, { t: 'rej', seq: m.seq, reason: dry.error, wait: 0 });
       if (ZONES && a.tool !== 'fill' && dry.idx.some(i => B.zoneTeam(SIZE, i % SIZE, (i / SIZE) | 0) !== team))
         return send(ws, { t: 'rej', seq: m.seq, reason: 'You can only draw inside your own team zone', wait: 0 });
-      if (!dry.idx.some(i => board.fb.data[i] !== a.c || board.teams[i] !== team)) return send(ws, { t: 'rej', seq: m.seq, reason: 'Nothing would change', wait: 0 });
+      const changesPixel = i => a.tool === 'eraser'
+        ? board.fb.data[i] !== P.BG || board.teams[i] !== -1
+        : board.fb.data[i] !== a.c || board.teams[i] !== team;
+      if (!dry.idx.some(changesPixel)) return send(ws, { t: 'rej', seq: m.seq, reason: 'Nothing would change', wait: 0 });
 
       const n = log.length, key = playerKey(ws.player.id);
       const entry = { n, ts: now, p: ws.player.name, u: key, tm: ws.player.team, tool: a.tool, pts: a.pts, c: a.c, f: a.f };

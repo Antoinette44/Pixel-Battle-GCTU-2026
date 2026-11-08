@@ -62,10 +62,11 @@ Never put the host key in a URL or commit it to source control.
 | Circle | Midpoint Circle; optional filled disc | Normal Battle and House |
 | Polygon | Scan-Line fill and Bresenham outline | Normal Battle and House |
 | Bucket | Queue-based, 4-connected Flood Fill | Normal Battle and House |
+| Eraser | Fixed 5-pixel circular brush stroke | Normal Battle and House |
 
 DDA is hidden in the normal interface and is also implemented in the Algorithm Lab. The server rejects DDA drawing outside a running House Challenge. Drawing limits are enforced by the rasterizer, including a 700-pixel shape limit, a circle radius limit of 20, a maximum of 8 polygon points, and a 1,500-pixel fill limit.
 
-No drawing tool is selected on join. With no tool active, users can navigate the board without placing pixels. Shortcuts `1`–`5` select Pen, Line, Circle, Polygon, and Bucket respectively; `6` selects DDA only during a running House Challenge. Use the palette to choose among 16 colours and four team colours. Undo and Redo affect your own actions (`Ctrl+Z`, `Ctrl+Shift+Z` or `Ctrl+Y`); they preserve later multiplayer edits. Drag/pan, pinch, wheel zoom, Fit, Export PNG, the in-game team selector, and the time-lapse replay are also available.
+No drawing tool is selected on join. With no tool active, users can navigate the board without placing pixels. Shortcuts `1`–`5` select Pen, Line, Circle, Polygon, and Bucket respectively; `6` selects DDA only during a running House Challenge, and `E` selects Eraser. Erasing is submitted as a shared action, clears pixel ownership, and can be undone or redone. Use the palette to choose among 16 colours and four team colours. Undo and Redo affect your own actions (`Ctrl+Z`, `Ctrl+Shift+Z` or `Ctrl+Y`); they preserve later multiplayer edits. Drag/pan, pinch, wheel zoom, Fit, Export PNG, the in-game team selector, and the time-lapse replay are also available.
 
 The 128 x 128 canvas is divided into four equal quadrants: Red top-left, Blue top-right, Green bottom-left, and Yellow (Gold in the palette) bottom-right. When zones are enabled, the server enforces each player's assigned zone; bucket fill is clipped to that zone. House Challenge requires zones to be enabled.
 
@@ -101,13 +102,15 @@ Run these commands from the repository root:
 | `node tests/dda.test.js` | DDA rasterization inputs, endpoints, line directions/slopes, zero-length lines, limits, and invalid input |
 | `node tests/house.test.js` | House evaluator reference score, all four zones, ordering determinism, rubric details, partial/waiting states, ties, tolerances, flood fill, and Undo/Redo |
 | `node tests/house-server.test.js` | Real-server House protocol, DDA restrictions, score visibility, host-watch authorization, timer/finalization, result writing/failure, and House DDA log replay |
+| `node tests/eraser.test.js` | Eraser brush rasterization, local pixel clearing, team ownership, and Undo/Redo |
+| `node tests/eraser-server.test.js` | Real-WebSocket erasing, multiplayer synchronization, team scoring/zones, Undo/Redo, and House score recalculation |
 | `node tests/normal_battle_golden.test.js` | Deterministic real-WebSocket Normal Battle transcript against its fixture |
 | `npm run test:server` | Existing standalone real-server WebSocket tests |
 | `npm run test:reset` | Existing reset and archive tests |
 | `npm run test:challenge` | Existing team-zone, pixel scoring, and server challenge timer tests |
 | `npm run test:browser` | Browser interaction test in Chromium; requires Python 3, Playwright for Python, and its Chromium browser installation |
 
-`npm test` intentionally does not include the separate DDA, House evaluator, House server, or golden transcript tests; run those explicitly as shown.
+`npm test` intentionally does not include the separate DDA, House evaluator/server, eraser, or golden transcript tests; run those explicitly as shown.
 
 ### Optional simulated load test
 
