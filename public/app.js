@@ -234,6 +234,7 @@
   };
   stage.addEventListener('pointerdown', (e) => {
     stage.setPointerCapture(e.pointerId);
+    hoverAt(e.clientX, e.clientY);
     const [x, y] = toPixel(e.clientX, e.clientY);
     const drawing = !!tool && e.pointerType !== 'mouse' && tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, drawing, points: drawing ? [[x, y]] : [] });
@@ -245,8 +246,9 @@
     }
   });
   stage.addEventListener('pointermove', (e) => {
+    hoverAt(e.clientX, e.clientY);
     const p = ptrs.get(e.pointerId);
-    if (!p) { hoverAt(e.clientX, e.clientY); return; }
+    if (!p) return;
     if (ptrs.size === 1) {
       if (p.drawing) {
         const [x, y] = toPixel(e.clientX, e.clientY);
@@ -262,6 +264,7 @@
         stage.scrollTop -= e.clientY - p.y;
         tx = stage.scrollLeft; ty = stage.scrollTop;
         requestGrid();
+        hoverAt(e.clientX, e.clientY);
       }
       p.x = e.clientX; p.y = e.clientY;
     } else if (ptrs.size === 2) {
@@ -271,9 +274,11 @@
       stage.scrollLeft -= cur.mx - pinchLast.mx;
       stage.scrollTop -= cur.my - pinchLast.my;
       pinchLast = cur;
+      hoverAt(e.clientX, e.clientY);
     }
   });
   const endPtr = (e) => {
+    hoverAt(e.clientX, e.clientY);
     const p = ptrs.get(e.pointerId);
     if (!p) return;
     const penStroke = p.drawing && e.type === 'pointerup';
@@ -295,17 +300,17 @@
   stage.addEventListener('pointerleave', () => { $('hover').style.display = 'none'; });
 
   function hoverAt(cx, cy) {
-    if (!tool) {
-      $('hover').style.display = 'none';
-      return;
-    }
     const [x, y] = toPixel(cx, cy);
     const h = $('hover');
     if (Raster.inBounds(fb, x, y)) {
-      h.style.display = 'block'; h.style.left = x + 'px'; h.style.top = y + 'px';
       const c = COLOURS[fb.data[y * SIZE + x]];
       $('coords').textContent = `x ${x}  y ${y}  ${c.name}`;
-    } else { h.style.display = 'none'; }
+      if (tool) {
+        h.style.display = 'block'; h.style.left = x + 'px'; h.style.top = y + 'px';
+      } else h.style.display = 'none';
+    } else {
+      h.style.display = 'none';
+    }
   }
 
   /* ---------------- tools ---------------- */
