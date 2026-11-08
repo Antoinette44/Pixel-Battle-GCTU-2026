@@ -295,6 +295,7 @@
     const p = ptrs.get(e.pointerId);
     if (!p) return;
     const penStroke = p.drawing && e.type === 'pointerup';
+    const eraseStroke = p.erasing && e.type === 'pointerup';
     const wasTap = !!tool && !p.drawing && !p.erasing && ptrs.size === 1 && !moved && e.type === 'pointerup';
     if (p.erasing) {
       if (e.type === 'pointerup') {
@@ -319,6 +320,7 @@
     if (!ptrs.size) stage.classList.remove('panning');
     if (ptrs.size === 1) { moved = true; const q = [...ptrs.values()][0]; q.sx = q.x; q.sy = q.y; }
     if (wasTap) tap(...toPixel(e.clientX, e.clientY));
+    if (eraseStroke) place();
   };
   stage.addEventListener('pointerup', endPtr);
   stage.addEventListener('pointercancel', endPtr);
@@ -349,7 +351,7 @@
     { id: 'circle',  label: 'Circle',  need: 2, hint: 'Tap the centre, then a point on the rim (midpoint circle).' },
     { id: 'polygon', label: 'Polygon', need: 3, hint: 'Tap 3 to 8 corners (scan-line fill).' },
     { id: 'fill',    label: 'Bucket',  need: 1, hint: 'Tap inside an area (queue flood fill).' },
-    { id: 'eraser',  label: 'Eraser',  need: 1, hint: 'Tap or drag to erase with a 5-pixel brush, then place the stroke.' },
+    { id: 'eraser',  label: 'Eraser',  need: 1, hint: 'Tap or drag to erase with a 5-pixel brush.' },
   ];
   const toolDef = () => TOOLS.find(t => t.id === tool);
   const houseRunning = () => ch.mode === 'house' && ch.state === 'running';

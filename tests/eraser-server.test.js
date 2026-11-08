@@ -7,6 +7,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const WebSocket = require('ws');
+const Board = require('../public/board.js');
 
 const root = path.join(__dirname, '..');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -27,6 +28,17 @@ function request(port, pathname) {
     http.get({ host: '127.0.0.1', port, path: pathname, timeout: 1000 }, response => {
       response.resume();
       response.on('end', () => resolve(response.statusCode));
+    }).on('error', reject);
+  });
+}
+
+function requestBody(port, pathname) {
+  return new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: pathname, timeout: 1000 }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, body }));
     }).on('error', reject);
   });
 }
@@ -174,7 +186,13 @@ async function main() {
       assert.strictEqual(afterRedo.colours[i], 0);
       assert.strictEqual(afterRedo.teams[i], -1);
     }
-    console.log('  ok  eraser Undo and Redo synchronize pixels and ownership for both players');
+    const apiLog = await requestBody(instance.port, '/api/log');
+    assert.strictEqual(apiLog.status, 200);
+    const replay = Board.create(128, 128, 0), entries = JSON.parse(apiLog.body).log;
+    entries.forEach((entry, n) => assert(!Board.apply(replay, entry, n).error, `replay failed at ${n}`));
+    assert.deepStrictEqual(Array.from(replay.fb.data), afterRedo.colours);
+    assert.deepStrictEqual(Array.from(replay.teams), afterRedo.teams);
+    console.log('  ok  eraser Undo and Redo synchronize for both players and replay from the action log');
 
     const startAt = red.messages.length;
     red.admin('start', { secs: 60, mode: 'house' });

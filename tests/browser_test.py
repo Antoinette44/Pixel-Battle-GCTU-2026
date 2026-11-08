@@ -87,7 +87,7 @@ with sync_playwright() as p:
     tool(pg,'eraser')
     x0,y0=center(pg,10,55); x1,y1=center(pg,30,55)
     pg.mouse.move(x0,y0); pg.mouse.down(); pg.mouse.move(x1,y1,steps=8); pg.mouse.up()
-    place(pg)
+    pg.wait_for_function("/Placed/.test(document.getElementById('msg').textContent)")
     sample=pg.evaluate("""()=>{const c=document.getElementById('base').getContext('2d');
       const rgb=(x,y)=>Array.from(c.getImageData(x,y,1,1).data.slice(0,3));
       return {erased:rgb(20,55),kept:rgb(20,45),bg:Palette.COLOURS[Palette.BG].rgb,
@@ -142,7 +142,7 @@ with sync_playwright() as p:
         x=x0+(x1-x0)*step/8; y=y0+(y1-y0)*step/8
         cdp.send('Input.dispatchTouchEvent',{'type':'touchMove','touchPoints':[touch(x,y)]})
     cdp.send('Input.dispatchTouchEvent',{'type':'touchEnd','touchPoints':[]})
-    place(ph)
+    ph.wait_for_function("/Placed/.test(document.getElementById('msg').textContent)")
     phone_pixel=ph.evaluate("""()=>{const c=document.getElementById('base').getContext('2d');
       return {pixel:Array.from(c.getImageData(30,110,1,1).data.slice(0,3)),bg:Palette.COLOURS[Palette.BG].rgb}}""")
     assert phone_pixel['pixel']==phone_pixel['bg'], 'touch-drag eraser must clear the shared stroke'

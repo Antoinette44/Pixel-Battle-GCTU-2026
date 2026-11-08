@@ -193,10 +193,9 @@
             for (let dx = -ERASER_RADIUS; dx <= ERASER_RADIUS; dx++)
               if (dx * dx + dy * dy <= ERASER_RADIUS * ERASER_RADIUS) plot(cx + dx, cy + dy);
         };
-        const path = (x, y) => bresenham(x, y, x, y, brush);
-        path(p[0][0], p[0][1]);
+        if (p.length === 1) brush(p[0][0], p[0][1]);
         for (let i = 1; i < p.length; i++)
-          bresenham(p[i - 1][0], p[i - 1][1], p[i][0], p[i][1], path);
+          bresenham(p[i - 1][0], p[i - 1][1], p[i][0], p[i][1], brush);
         break;
       }
       case 'line':
