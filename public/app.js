@@ -235,7 +235,7 @@
   stage.addEventListener('pointerdown', (e) => {
     stage.setPointerCapture(e.pointerId);
     const [x, y] = toPixel(e.clientX, e.clientY);
-    const drawing = e.pointerType !== 'mouse' && tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
+    const drawing = !!tool && e.pointerType !== 'mouse' && tool === 'pen' && connected && !cooling() && Raster.inBounds(fb, x, y);
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, drawing, points: drawing ? [[x, y]] : [] });
     if (ptrs.size === 1) moved = false;
     else {
@@ -277,7 +277,7 @@
     const p = ptrs.get(e.pointerId);
     if (!p) return;
     const penStroke = p.drawing && e.type === 'pointerup';
-    const wasTap = !p.drawing && ptrs.size === 1 && !moved && e.type === 'pointerup';
+    const wasTap = !!tool && !p.drawing && ptrs.size === 1 && !moved && e.type === 'pointerup';
     if (penStroke) {
       const [x, y] = toPixel(e.clientX, e.clientY);
       const last = p.points[p.points.length - 1];
@@ -295,6 +295,10 @@
   stage.addEventListener('pointerleave', () => { $('hover').style.display = 'none'; });
 
   function hoverAt(cx, cy) {
+    if (!tool) {
+      $('hover').style.display = 'none';
+      return;
+    }
     const [x, y] = toPixel(cx, cy);
     const h = $('hover');
     if (Raster.inBounds(fb, x, y)) {
@@ -331,7 +335,8 @@
   }
   function selectTool(id) {
     if (id === 'dda' && !houseRunning()) return;
-    tool = id; pts = [];
+    tool = tool === id ? null : id;
+    pts = [];
     for (const b of $('tools').children) {
       const selected = b.dataset.id === tool;
       b.classList.toggle('on', selected);
@@ -339,7 +344,8 @@
     }
     $('fillOpt').classList.toggle('hidden', tool !== 'circle');
     $('undoPt').classList.toggle('hidden', tool !== 'polygon');
-    $('hint').textContent = toolDef() ? toolDef().hint : 'Pan and zoom the canvas, or select a drawing tool.';
+    stage.classList.toggle('drawing', !!tool);
+    $('hint').textContent = toolDef()?.hint || 'Navigation mode - select a tool to start drawing.';
     updatePreview();
   }
 
