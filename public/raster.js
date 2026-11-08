@@ -143,13 +143,14 @@
   }
 
   /* ---------------- Actions ----------------
-     action = { tool: 'pen'|'line'|'circle'|'polygon'|'fill', pts: [[x,y],...], c: colourIndex, f: 0|1 }
+     action = { tool: 'pen'|'line'|'dda'|'circle'|'polygon'|'fill', pts: [[x,y],...], c: colourIndex, f: 0|1 }
        pen     1..700 points (connected with Bresenham)
        line    2 points (start, end)
+       dda     2 points (start, end)
        circle  2 points (centre, a point on the rim) ; f = 1 -> filled disc
        polygon 3..8 points (scan-line filled + Bresenham outline)
        fill    1 point (seed)                                                               */
-  const NEED = { pen: [1, LIMITS.maxPathPoints], line: [2, 2], circle: [2, 2], polygon: [3, LIMITS.maxPoly], fill: [1, 1] };
+  const NEED = { pen: [1, LIMITS.maxPathPoints], line: [2, 2], dda: [2, 2], circle: [2, 2], polygon: [3, LIMITS.maxPoly], fill: [1, 1] };
 
   // Checks a raw (untrusted) action and returns a clean copy, or { error }.
   function normalise(a, fb, numColours) {
@@ -186,6 +187,8 @@
         break;
       case 'line':
         bresenham(p[0][0], p[0][1], p[1][0], p[1][1], plot); break;
+      case 'dda':
+        dda(p[0][0], p[0][1], p[1][0], p[1][1], plot); break;
       case 'circle': {
         const r = Math.round(Math.hypot(p[1][0] - p[0][0], p[1][1] - p[0][1]));
         if (r < 1) return { error: 'Circle radius must be at least 1' };

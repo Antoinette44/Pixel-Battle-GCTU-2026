@@ -9,6 +9,7 @@
   const ICONS = {
     pen: '<path d="m16 4 4 4"/><path d="M4 20l4-.8L19 8a2.8 2.8 0 0 0-4-4L4 15z"/>',
     line: '<path d="M5 19 19 5"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/>',
+    dda: '<path d="M5 19 19 5"/><path d="M5 15h4v4H5zM9 11h4v4H9zM13 7h4v4h-4zM17 3h4v4h-4z"/>',
     circle: '<circle cx="12" cy="12" r="8"/>',
     polygon: '<path d="m12 3 8 5-2 10-11 2-3-10z"/>',
     fill: '<path d="m4 15 8-8 8 8"/><path d="M6 17h12l-2 4H8z"/><path d="m12 3 2 2"/>',
@@ -29,7 +30,8 @@
   let tool = null, pts = [], colour = 16, myTeam = hasSavedTeam ? parsedTeam : 0;
   let readyAt = 0, cooldownMs = 5000, connected = false, seq = 0, ws = null, retry = 500, scores = TEAMS.map(() => 0);
   let zonesOn = true;                   // server tells us whether team-zone restriction is enforced
-  let ch = { state: 'idle', dur: 300000, endAt: 0, final: null, winners: [] };   // challenge state; endAt is on THIS browser's monotonic clock
+  let ch = { state: 'idle', mode: 'battle', dur: 300000, endAt: 0, final: null, winners: [] };   // challenge state; endAt is on THIS browser's monotonic clock
+  let houseScore = null, hostHouseScores = null, houseFinal = null, hostWatchAuthorized = false;
   let shownResult = false;
   let undoLeft = 0;                       // how many of MY drawings can still be undone (server tells us)
   let redoLeft = 0;                       // how many of MY undone drawings can be restored
@@ -306,23 +308,29 @@
   const TOOLS = [
     { id: 'pen',     label: 'Pen',     need: 1, hint: 'Tap for one pixel or drag to draw a connected stroke.' },
     { id: 'line',    label: 'Line',    need: 2, hint: 'Tap the start, then the end (Bresenham).' },
+    { id: 'dda',     label: 'DDA',     need: 2, hint: 'Tap the start, then the end (DDA). Shortcut: 6.' },
     { id: 'circle',  label: 'Circle',  need: 2, hint: 'Tap the centre, then a point on the rim (midpoint circle).' },
     { id: 'polygon', label: 'Polygon', need: 3, hint: 'Tap 3 to 8 corners (scan-line fill).' },
     { id: 'fill',    label: 'Bucket',  need: 1, hint: 'Tap inside an area (queue flood fill).' },
   ];
   const toolDef = () => TOOLS.find(t => t.id === tool);
+  const houseRunning = () => ch.mode === 'house' && ch.state === 'running';
   function buildTools() {
     $('tools').innerHTML = '';
-    TOOLS.forEach((t, k) => {
+    const available = TOOLS.filter(t => t.id !== 'dda' || houseRunning());
+    $('tools').classList.toggle('house-mode', houseRunning());
+    available.forEach((t) => {
       const b = document.createElement('button');
       b.innerHTML = `${icon(t.id)}<span>${t.label}</span>`;
-      b.title = `${t.label} (key ${k + 1})`; b.setAttribute('aria-label', t.label);
+      const shortcut = t.id === 'dda' ? 6 : TOOLS.filter(item => item.id !== 'dda').indexOf(t) + 1;
+      b.title = `${t.label} (key ${shortcut})`; b.setAttribute('aria-label', `${t.label} (key ${shortcut})`);
       b.onclick = () => selectTool(t.id);
       b.dataset.id = t.id;
       $('tools').appendChild(b);
     });
   }
   function selectTool(id) {
+    if (id === 'dda' && !houseRunning()) return;
     tool = id; pts = [];
     for (const b of $('tools').children) {
       const selected = b.dataset.id === tool;
@@ -421,7 +429,8 @@
 
   window.addEventListener('keydown', (e) => {
     if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
-    if (e.key >= '1' && e.key <= '5') selectTool(TOOLS[+e.key - 1].id);
+    if (e.key >= '1' && e.key <= '5') selectTool(TOOLS.filter(t => t.id !== 'dda')[+e.key - 1].id);
+    else if (e.key === '6' && houseRunning()) selectTool('dda');
     else if (e.key === 'Enter') place();
     else if (e.key === 'Escape') $('cancel').onclick();
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
@@ -499,8 +508,18 @@
         t: 'hello', id: pid, name: store.get('pb_name', 'Player'), team: myTeam,
         ...(pendingTeamChoice === null ? {} : { teamChoice: pendingTeamChoice }),
       }));
+      if (isHostView() && $('hostKey').value) {
+        ws.send(JSON.stringify({ t: 'watch', key: $('hostKey').value }));
+      }
     };
-    ws.onclose = () => { setStatus(false, 'reconnecting...'); setTimeout(connect, retry); retry = Math.min(retry * 2, 5000); };
+    ws.onclose = () => {
+      hostWatchAuthorized = false;
+      hostHouseScores = null;
+      renderHostHouseScores();
+      setStatus(false, 'reconnecting...');
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 2, 5000);
+    };
     ws.onerror = () => {};
     ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data);
@@ -508,7 +527,8 @@
         if (m.size !== SIZE) setSize(m.size);
         for (let i = 0; i < m.grid.length; i++) fb.data[i] = parseInt(m.grid[i], 36);
         for (let i = 0; i < m.teams.length; i++) pixelTeams[i] = parseInt(m.teams[i], 36) - 1;
-        renderAll(); scores = m.scores; renderScores();
+        renderAll();
+        if (Array.isArray(m.scores)) { scores = m.scores; renderScores(); }
         cooldownMs = m.cooldown; readyAt = Date.now() + m.wait;
         $('online').textContent = m.online; $('actions').textContent = m.actions; undoLeft = m.undo || 0; redoLeft = m.redo || 0;
         zonesOn = m.zones !== false;
@@ -523,7 +543,7 @@
           pixelTeams[i] = m.teams[k];
         });
         baseCtx.putImageData(baseImg, 0, 0);
-        scores = m.sc; renderScores();
+        if (Array.isArray(m.sc)) { scores = m.sc; renderScores(); }
         $('actions').textContent = m.n + 1;
         if (pts.length) updatePreview();
       } else if (m.t === 'online') {
@@ -537,6 +557,23 @@
         toast('The battle was reset');
       } else if (m.t === 'ch') {
         applyChallenge(m);
+      } else if (m.t === 'house') {
+        houseScore = m;
+        renderHouseScore();
+      } else if (m.t === 'houseWatch') {
+        if (hostWatchAuthorized) {
+          hostHouseScores = m;
+          if (ch.mode === 'house') renderHostHouseScores();
+        }
+      } else if (m.t === 'houseFinal') {
+        houseFinal = m;
+        if (ch.mode === 'house' && ch.state === 'ended') showResult();
+      } else if (m.t === 'watch') {
+        hostWatchAuthorized = m.ok === true;
+        $('hostWatchStatus').textContent = hostWatchAuthorized ? 'Authorized' : (m.msg || 'Authorization failed');
+        if (!hostWatchAuthorized) hostHouseScores = null;
+        renderHostHouseScores();
+        if (!m.ok) toast(m.msg || 'Host authorization failed');
       } else if (m.t === 'team') {
         if (m.ok) { setMyTeam(m.team); colour = TEAMS[myTeam].colour; selectColour(colour); } else { setMyTeam(m.team); toast(m.reason); }
       } else if (m.t === 'adm') {
@@ -565,10 +602,108 @@
      The server sends the REMAINING time; we count down on performance.now(), which does not depend on the
      device's wall clock, so changing the browser/system clock cannot change the timer.                      */
   const fmt = (ms) => { const s = Math.ceil(ms / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+  const isHostView = () => new URLSearchParams(location.search).has('host');
+  function renderHouseScore() {
+    const active = ch.mode === 'house' && ch.state !== 'idle';
+    $('housePanel').classList.toggle('hidden', !active);
+    if (!active || !houseScore) return;
+    $('houseTeamName').textContent = TEAMS[houseScore.team]?.name || 'Your team';
+    $('houseMarks').textContent = Number.isFinite(houseScore.marks) ? houseScore.marks : 0;
+    const checklist = $('houseChecklist');
+    checklist.replaceChildren();
+    for (const item of houseScore.items || []) {
+      const row = document.createElement('div');
+      row.className = 'house-item' + (item.status === 'full' ? ' complete' : '');
+      const title = document.createElement('strong');
+      title.textContent = item.label;
+      const points = document.createElement('span');
+      points.className = 'house-points';
+      points.textContent = `${item.units / 4} / ${item.maxUnits / 4} marks`;
+      const hint = document.createElement('span');
+      hint.className = 'house-hint';
+      hint.textContent = item.status === 'waiting' ? (item.hint || 'Waiting for required house walls') :
+        `${item.status}${item.hint ? ` - ${item.hint}` : ''}`;
+      row.append(title, points, hint);
+      checklist.appendChild(row);
+    }
+  }
+  function renderHostHouseScores() {
+    const visible = isHostView() && hostWatchAuthorized && ch.mode === 'house' &&
+      ch.state !== 'idle' && hostHouseScores && Array.isArray(hostHouseScores.teams);
+    $('hostHouseScores').classList.toggle('hidden', !visible);
+    if (!visible) return;
+    const container = $('hostHouseTeams');
+    container.replaceChildren();
+    for (const team of hostHouseScores.teams) {
+      const row = document.createElement('div');
+      row.className = 'house-team-score';
+      row.style.borderColor = COLOURS[TEAMS[team.team].colour].hex;
+      const name = document.createElement('span');
+      name.textContent = TEAMS[team.team].name;
+      const marks = document.createElement('strong');
+      marks.textContent = `${team.marks} marks`;
+      row.append(name, marks);
+      container.appendChild(row);
+    }
+  }
+  function renderHouseFinal() {
+    $('resBreakdown').classList.remove('hidden');
+    const teams = houseFinal && houseFinal.teams;
+    const scoresForTeams = houseFinal && houseFinal.scores || ch.final || [];
+    const winners = houseFinal && houseFinal.winners || ch.winners;
+    const ranking = TEAMS.map(team => ({
+      ...team, marks: Number(scoresForTeams[team.id]) || 0,
+      result: teams && teams[team.id],
+    })).sort((a, b) => b.marks - a.marks || a.id - b.id);
+    const draw = winners.length !== 1;
+    const champion = draw ? null : TEAMS[winners[0]];
+    const colour = draw ? '#36454F' : COLOURS[champion.colour].hex;
+    $('resBadge').style.background = colour;
+    $('resBadge').textContent = draw ? '=' : TEAM_WORD[champion.id][0];
+    $('resTitle').textContent = draw ? 'House Challenge draw!' : `${champion.name} wins the House Challenge!`;
+    $('resTitle').style.color = colour;
+    $('resSub').textContent = draw
+      ? `Tie for first: ${winners.map(team => TEAMS[team].name).join(' & ')} (${ranking[0]?.marks || 0} marks).`
+      : `${champion.name} finished with ${ranking[0]?.marks || 0} marks.`;
+    let rank = 0, priorMarks = null;
+    $('resScores').innerHTML = ranking.map((team, index) => {
+      if (team.marks !== priorMarks) rank = index + 1;
+      priorMarks = team.marks;
+      return `<div class="${winners.includes(team.id) ? 'win' : ''}" style="border-color:${COLOURS[team.colour].hex}"><span><span class="house-rank">#${rank}</span>${team.name}</span><span>${team.marks}</span></div>`;
+    }).join('');
+    const detail = $('resBreakdown');
+    detail.replaceChildren();
+    for (const team of ranking) {
+      const line = document.createElement('li');
+      const name = document.createElement('span');
+      const houseParts = team.result?.house || {};
+      const algoParts = team.result?.algo || {};
+      name.textContent = `${team.name}: walls ${houseParts.walls || 0}, roof ${houseParts.roof || 0}, door ${houseParts.door || 0}, windows ${houseParts.windows || 0}, sun ${houseParts.sun || 0}; DDA ${algoParts.dda || 0}, Bresenham ${algoParts.bresenham || 0}, midpoint ${algoParts.midpoint || 0}, scan-line ${algoParts.scanline || 0}, flood fill ${algoParts.flood || 0}`;
+      const mark = document.createElement('strong');
+      mark.textContent = `${team.marks} marks`;
+      line.append(name, mark);
+      detail.appendChild(line);
+    }
+    $('result').classList.remove('hidden');
+  }
   function applyChallenge(info) {
     if (!info) return;
     const prev = ch.state;
-    ch = { state: info.state, dur: info.dur, endAt: performance.now() + (info.rem || 0), final: info.final, winners: info.winners || [] };
+    ch = {
+      state: info.state, mode: info.mode || 'battle', dur: info.dur,
+      endAt: performance.now() + (info.rem || 0), final: info.final, winners: info.winners || [],
+    };
+    if (ch.state === 'running') houseFinal = null;
+    if (ch.mode !== 'house') {
+      houseScore = null;
+      houseFinal = null;
+      hostHouseScores = null;
+    }
+    $('score').classList.toggle('hidden', ch.mode === 'house');
+    buildTools();
+    if (tool === 'dda' && !houseRunning()) selectTool(null);
+    renderHouseScore();
+    renderHostHouseScores();
     if (ch.state !== 'ended') { shownResult = false; $('result').classList.add('hidden'); }
     else if (!shownResult) showResult();
     if (prev !== ch.state) refreshButtons();
@@ -578,8 +713,10 @@
     const left = ch.state === 'running' ? Math.max(0, ch.endAt - performance.now()) : 0;
     const txt = ch.state === 'running' ? fmt(left) : ch.state === 'ended' ? '00:00' : '--:--';
     $('chTime').textContent = txt; $('timerHead').textContent = txt;
-    $('chState').textContent = ch.state === 'running' ? 'Challenge running - most team-owned pixels wins' :
-      ch.state === 'ended' ? 'Challenge over' : 'Waiting for the host to start the challenge (warm-up drawing is allowed)';
+    $('chState').textContent = ch.state === 'running'
+      ? ch.mode === 'house' ? 'Build a House: earn marks for the house and algorithm demonstrations' : 'Challenge running - most team-owned pixels wins'
+      : ch.state === 'ended' ? (ch.mode === 'house' ? 'Build a House Challenge over' : 'Challenge over')
+        : 'Waiting for the host to start the challenge (warm-up drawing is allowed)';
     const bar = $('chbar');
     bar.classList.toggle('running', ch.state === 'running'); bar.classList.toggle('ended', ch.state === 'ended');
     bar.classList.toggle('low', ch.state === 'running' && left <= 30000);
@@ -587,6 +724,11 @@
   setInterval(renderTimer, 200);
   function showResult() {
     shownResult = true;
+    if (ch.mode === 'house') {
+      renderHouseFinal();
+      return;
+    }
+    $('resBreakdown').classList.add('hidden');
     const f = ch.final || scores, w = ch.winners;
     const draw = w.length !== 1;
     const hex = draw ? '#36454F' : COLOURS[TEAMS[w[0]].colour].hex;
@@ -599,17 +741,32 @@
   }
   $('resClose').onclick = () => $('result').classList.add('hidden');
 
-  /* host controls: only shown with ?host in the address; the SERVER checks the host key (or localhost) */
-  const qs = new URLSearchParams(location.search);
-  if (qs.has('host')) {
+  /* ?host reveals controls only; the server authorizes score access from the entered host key. */
+  if (isHostView()) {
     $('hostBox').classList.remove('hidden');
     $('hostKey').classList.remove('hidden');
   }
+  $('hostMode').onchange = () => {
+    $('hostMin').value = $('hostMode').value === 'house' ? '10' : '5';
+  };
   const hostSend = (cmd) => {
     if (!connected) return toast('Not connected');
-    ws.send(JSON.stringify({ t: 'admin', cmd, key: $('hostKey').value, secs: Math.round((+$('hostMin').value || 5) * 60) }));
+    if (cmd === 'start') {
+      ws.send(JSON.stringify({ t: 'watch', key: $('hostKey').value }));
+      ws.send(JSON.stringify({
+        t: 'admin', cmd, key: $('hostKey').value,
+        mode: $('hostMode').value,
+        secs: Math.round((+$('hostMin').value || 5) * 60),
+      }));
+      return;
+    }
+    ws.send(JSON.stringify({ t: 'admin', cmd, key: $('hostKey').value }));
   };
   $('hostStart').onclick = () => hostSend('start');
+  $('hostWatch').onclick = () => {
+    if (!connected) return toast('Not connected');
+    ws.send(JSON.stringify({ t: 'watch', key: $('hostKey').value }));
+  };
   $('hostReset').onclick = () => { if (confirm('Reset Battle?\n\nThis clears the canvas, sets all scores to 0 and starts a new action history for everyone. Teams are kept.')) hostSend('reset'); };
 
   /* ---------------- toast ---------------- */

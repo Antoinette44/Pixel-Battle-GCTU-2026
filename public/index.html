@@ -28,17 +28,26 @@
     <!-- 2. How to play + rules -->
     <section class="step" data-step="1">
       <h2>How to play</h2>
-      <ol class="how">
-        <li><b>Pick a tool:</b> Pen, Line, Circle, Polygon or Bucket.</li>
-        <li><b>Pick a colour</b> from the palette; your team scores pixels no matter which colour you use.</li>
-        <li><b>Tap the canvas</b> to place points. Drag to move, pinch or scroll to zoom.</li>
-        <li><b>Press Place</b> to paint it for everyone to see.</li>
-      </ol>
+      <h3>Normal Battle</h3>
+      <ul class="how">
+        <li>Pick a team and drawing tool.</li>
+        <li>Draw inside your team's coloured zone.</li>
+        <li>Wait 5 seconds between actions.</li>
+        <li>Your team scores the pixels it owns, whatever their colour.</li>
+        <li>Highest score wins. A tie is a draw.</li>
+      </ul>
+      <h3>Build a House Challenge</h3>
+      <ul class="how">
+        <li>Build the reference house inside your team's zone.</li>
+        <li>Draw its walls, roof, door, windows and sun.</li>
+        <li>Use Pen, Line, Circle, Polygon, Fill or DDA.</li>
+        <li>Follow your checklist and live marks.</li>
+      </ul>
       <h2>Rules</h2>
       <ul class="rules">
-        <li>You can paint once every <b>5 seconds</b> (watch the cooldown bar).</li>
-        <li>Each shape is limited: circle radius up to <b>20</b>, polygons up to <b>8</b> corners, bucket fills up to <b>1500</b> pixels.</li>
-        <li>The team with the most pixels on the canvas <b>wins</b>.</li>
+        <li><b>Normal Battle:</b> the team with the most owned pixels wins. Equal scores are a draw.</li>
+        <li><b>Build a House:</b> earn <b>60 house marks</b> and <b>40 algorithm marks</b> (100 total).</li>
+        <li><b>Build a House:</b> The host sets the challenge time. Highest marks win; equal marks are a draw.</li>
         <li>Be kind: no offensive drawings.</li>
       </ul>
       <div class="row nav">
@@ -83,14 +92,25 @@
 <section id="chbar" aria-label="Challenge timer">
   <div class="chinfo"><span id="chState">Waiting for the host to start the challenge</span><b id="chTime">--:--</b></div>
   <div id="hostBox" class="hostbox hidden">
+    <label>Mode
+      <select id="hostMode">
+        <option value="battle">Normal Battle</option>
+        <option value="house">Build a House</option>
+      </select>
+    </label>
     <label>Minutes <input id="hostMin" type="number" min="1" max="60" step="1" value="5"></label>
     <input id="hostKey" type="password" placeholder="Host key" autocomplete="off" class="hidden">
     <button id="hostStart" class="primary" type="button">Start challenge</button>
-        <button id="hostReset" type="button">Reset Battle</button>
+    <button id="hostWatch" type="button">Authorize live scores</button>
+    <button id="hostReset" type="button">Reset Battle</button>
   </div>
 </section>
 
 <section id="score" aria-label="Team scoreboard"></section>
+<section id="hostHouseScores" class="house-card hidden" aria-label="Live house challenge team scores">
+  <h2>Live team scores <span id="hostWatchStatus" class="muted">Host authorization required</span></h2>
+  <div id="hostHouseTeams" class="house-team-scores"></div>
+</section>
 
 <main>
   <div id="viewcol">
@@ -146,6 +166,11 @@
       <button id="place" class="primary" disabled>Place</button>
     </div>
     <div id="msg" class="msg"></div>
+    <section id="housePanel" class="house-card hidden" aria-live="polite">
+      <h2>Your team’s house challenge</h2>
+      <div class="house-total"><span id="houseTeamName">Team</span><b><span id="houseMarks">0</span> marks</b></div>
+      <div id="houseChecklist" class="house-checklist"></div>
+    </section>
 
     <div class="row">
       <label>Team
@@ -190,6 +215,7 @@
     <h2 id="resTitle" style="text-align:center"></h2>
     <p id="resSub" class="muted"></p>
     <div id="resScores" class="resScores"></div>
+    <ol id="resBreakdown" class="resBreakdown hidden"></ol>
     <button id="resClose" class="primary big" type="button">Close</button>
   </div>
 </div>

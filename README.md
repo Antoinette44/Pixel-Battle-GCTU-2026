@@ -1,107 +1,158 @@
-# Pixel Battle (CSSD 315, Brief 1)
+# Pixel Battle (CSSD 315)
 
-A live multiplayer pixel canvas for the GCTU open day. Everybody on the Wi-Fi opens one link on a phone or laptop,
-joins one of four teams and paints on a shared **128 x 128** canvas. All shapes are rasterized by **our own code**
-(`public/raster.js`): no canvas `lineTo / arc / fill` is used anywhere.
+Pixel Battle is a real-time multiplayer pixel-art application for the GCTU open day. Players join one of four teams and draw together on a shared raster canvas. The server validates and applies drawing actions, tracks each pixel's colour separately from its owning team, and synchronizes board changes over WebSockets.
 
-## Run it
+The normal canvas is 128 x 128 pixels. The server accepts larger square canvases through configuration, but the currently inspected browser and course tests are centered on 128 x 128.
 
-```bash
-npm ci               # installs the locked runtime dependency: ws
-npm start            # http://localhost:3000   (also prints the Wi-Fi address, e.g. http://192.168.1.20:3000)
-npm test             # raster, board, live WebSocket, reset and challenge tests
-npm run test:server  # end-to-end test: starts the real server and real websocket clients
-npm run test:reset   # reset, archive and replay behavior
-npm run test:challenge # zone, scoring and server challenge timer behavior
-npm run test:browser # real Chromium test (needs: pip install playwright && playwright install chromium)
-npm run demo         # starts the server with a saved battle loaded, to show the replay any time
+## Modes
+
+### Normal Battle
+
+Players compete for team-owned pixels. A pixel's team ownership is independent of its drawing colour; overwriting a pixel transfers ownership and updates the pixel scoreboard. When the challenge timer ends, the team with the most owned pixels wins; equal scores are announced as a draw. Normal Battle retains the regular toolset and pixel-based scoreboard.
+
+### Build a House Challenge
+
+Build a House is a timed, server-scored challenge. All four teams receive the same challenge duration and are evaluated only in their assigned zones. The host can choose this mode in the host panel; selecting it sets the duration field to 10 minutes, which remains editable. The server controls the actual timer and refuses to start this mode if team zones are disabled.
+
+The 100-mark rubric is:
+
+| Category | Marks |
+|---|---:|
+| House: four walls | 15 |
+| House: triangular roof | 15 |
+| House: door | 10 |
+| House: two windows | 10 |
+| House: circular sun | 10 |
+| Algorithms: DDA | 10 |
+| Algorithms: Bresenham | 10 |
+| Algorithms: Midpoint Circle | 10 |
+| Algorithms: Scan-Line Polygon Fill | 5 |
+| Algorithms: Flood Fill | 5 |
+
+The server evaluates accepted drawing actions and their surviving pixels, not just the selected tool. Players see their own team's live mark total, checklist, item status, and hints. An authorized host can see all four live scores. At completion, everyone receives the final team breakdowns and rankings; equal top scores are shown as a draw. Undo and Redo change the board and cause the evaluator to recalculate.
+
+## Install and run locally
+
+Requirements: Node.js 18 or later and npm.
+
+```sh
+npm ci
+npm start
 ```
 
-Phones on the same Wi-Fi open the "on the Wi-Fi" address printed in the terminal.
-For the online class activity, deploy to Render / Railway (see below) and share the public link.
+By default, the server listens on port **4000** and prints its Wi-Fi address. Open `http://localhost:4000` on the host machine, or use the printed address from another device on the same network. The browser uses WebSocket or secure WebSocket according to the page protocol.
 
-Options (environment variables): `PORT` (default 3000), `COOLDOWN_MS` (default 5000),
-`CANVAS_SIZE` (default 128), `DATA_DIR` (default `./data`), and `ADMIN_KEY` (required for remote host controls).
-The HTTP server binds to `0.0.0.0`; the browser chooses `ws://` or `wss://` from the page protocol.
+### Host panel and authorization
 
-**Team zones and challenge timer.** The canvas is split into four quadrants (Red top-left, Blue top-right, Green bottom-left, Gold bottom-right); the server only accepts drawing inside the player's own zone (`ZONES=0` turns this off). Open `/?host`, enter `ADMIN_KEY` in the host panel, set the minutes (default 5, or `CHALLENGE_SECS`) and press *Start challenge*. On a local server with no `ADMIN_KEY`, host controls are limited to local connections. Admin commands are authenticated over the WebSocket; HTTP GET reset/start endpoints are intentionally disabled so keys are not exposed in URLs. Starting archives the old log and clears the canvas. Tests: `npm run test:challenge`.
+Open the application with `/?host` (for example `http://localhost:4000/?host`) to reveal the host controls. This URL parameter only reveals the interface; it does not authorize host actions or score access.
 
-## How it meets the brief
+Enter the configured `ADMIN_KEY` in the host panel. Use **Authorize live scores** to send the key in the server's WebSocket `watch` message. The server authorizes the socket and rechecks authorization when sending all-team House scores. Starting either mode also sends the selected mode and key in the authenticated `admin` message. Without `ADMIN_KEY`, the server permits host operations only for direct loopback connections; remote clients must use a configured key.
 
-| # | Requirement | Where |
-|---|-------------|-------|
-| 1 | Shared canvas >= 128x128, own `setPixel` only | `raster.js: setPixel`; the frame buffer is a `Uint8Array` of palette indices. Canvas elements only blit the finished buffer (`putImageData` / `drawImage`). |
-| 2 | Pen, line (Bresenham), circle (midpoint), polygon (scan-line), bucket (queue flood fill) | No drawing tool is selected initially, so the canvas starts in navigation mode; choose a tool to draw. `raster.js: bresenham, midpointCircle/circle, fillPolygon, floodFill`. Pen pointer strokes join sampled points with Bresenham; DDA is included too (Algorithm lab). |
-| 3 | Real-time sync, new player gets the canvas | `server.js` broadcasts every action; the `init` message sends the whole grid on join and on reconnect. |
-| 4 | 16-colour HSB palette + team colours | `palette.js` (hand-written HSB<->RGB). The UI shows H, S, B, RGB and HEX for the selected colour and in the "Palette sheet" table. Colours 16-19 are team colours. |
-| 5 | Cooldown + live team scoreboard | Cooldown is enforced on the **server** per player id (5 s). Every pixel stores its drawing colour and owning team separately; the scoreboard counts team ownership, updated on every change. |
-| 6 | Time-lapse replay from a stored action log | Every action is appended to `DATA_DIR/actions.ndjson` (`./data/actions.ndjson` by default). The Replay section loads `/api/log` and re-runs the same rasterizers; speed control, scrubber, video recording. |
-| 7 | Touch + laptop, 15+ players tested | Pointer events: pen drag = connected stroke; other one-finger drags pan; pinch / wheel = zoom. `tools/loadtest.js` simulates N players. |
-| + | Stretch | Zoom/pan viewport, export PNG, replay recorded as .webm video, **undo/redo your own actions** (buttons, Ctrl+Z and Ctrl+Shift+Z / Ctrl+Y). |
+Choose **Normal Battle** or **Build a House** from the mode selector, set the duration in minutes, and select **Start challenge**. The host panel defaults to Normal Battle for five minutes; selecting Build a House sets the duration to ten minutes. The server accepts durations from 5 seconds to 60 minutes and runs the timer authoritatively. Starting a challenge resets the active board and archives the preceding action log. The host's Reset Battle control clears the current battle and returns the mode to idle.
 
-### How undo/redo works (public/board.js)
-* The board remembers, for every pixel, **which action painted it last** and what was there before.
-* "Undo" removes your last drawing that is still active. A pixel only goes back if it is **still yours**: if another player painted over it
-  afterwards, their pixel stays (fair play). Redo restores only pixels that still have the state left behind by the undo, so it also
-  preserves later multiplayer edits. New drawings clear that player's redo history. Undo/redo actions have a 0.5 s anti-spam gap and do
-  not refund the drawing cooldown.
-* Undo and redo are written to the action log as `{tool:'undo'|'redo', ref:n}`, and replay uses the same `board.js`, so the time-lapse
-  always equals the live canvas. Score changes follow actual pixel ownership transitions.
-* The log stores a short one-way hash of the player id (`u`), never the secret id, so undo/redo history survives a server restart.
-* Pixel ownership is separate from its palette colour. Repainting a pixel with the same visible colour can transfer ownership, and
-  undo/redo restore both the colour and team that owned each affected pixel.
+Never put the host key in a URL or commit it to source control.
 
-### Design decisions you should be able to explain
-* **The server is the authority.** Clients send an *action* (`tool + points + colour`), not pixels. The server runs the same
-  `raster.js`, validates the resulting pixels and team-zone limits, and records the action. The same function replays the log, so replay = live result.
-* **Limits keep the battle fair:** max 700 pixels per shape, circle radius <= 20, polygon <= 8 corners,
-  bucket region <= 1500 pixels (one bucket cannot wipe the canvas). Change them in `LIMITS` at the top of `raster.js`.
-* **Action ordering:** drawing, undo and redo messages require strictly increasing per-connection sequence numbers; duplicate and out-of-order requests are rejected.
-* **First-time help:** a five-step tour starts for players who have not finished it. Finish persists in local storage; Skip does not. Help / Tutorial can restart the tour.
-* **UI palette:** the interface uses navy `#003366`, slate `#36454F`, teal `#01F9C6`, and canvas beige `#E9E0C9`, with Montserrat / Open Sans web fonts and local fallbacks.
-* **y = 0 is the top row** in memory (like image files). The lecture uses bottom-left; the algorithms are identical, the picture is flipped.
-* **Flood fill is 4-connected and queue-based** (no recursion), as on slide 19.
-* Wire format is JSON; the grid is a 16 384-character string of base-36 digits (1 char per pixel).
+## Drawing tools, algorithms, and controls
 
-## Load test (requirement 7)
+| Tool | Raster algorithm | Availability |
+|---|---|---|
+| Pen | Connected pointer samples joined with Bresenham | Normal Battle and House |
+| Line | Bresenham line | Normal Battle and House |
+| DDA | Digital Differential Analyzer line | Running House Challenge only; shortcut `6` |
+| Circle | Midpoint Circle; optional filled disc | Normal Battle and House |
+| Polygon | Scan-Line fill and Bresenham outline | Normal Battle and House |
+| Bucket | Queue-based, 4-connected Flood Fill | Normal Battle and House |
 
-```bash
-COOLDOWN_MS=1000 DATA_DIR=./data-test PORT=3111 npm start        # terminal 1
-URL=ws://localhost:3111 npm run loadtest -- 25 30                # terminal 2: 25 bots for 30 s
-```
-It reports broadcast latency (p50/p95/max) and checks that every bot's canvas equals the snapshot a brand-new player receives.
-Our run (25 bots, 20 s, same machine, ~20% of turns are undo): p95 latency 3 ms, 25/25 canvases identical.
-**Repeat it on the real class Wi-Fi with real phones and put your own numbers in the report.**
+DDA is hidden in the normal interface and is also implemented in the Algorithm Lab. The server rejects DDA drawing outside a running House Challenge. Drawing limits are enforced by the rasterizer, including a 700-pixel shape limit, a circle radius limit of 20, a maximum of 8 polygon points, and a 1,500-pixel fill limit.
+
+No drawing tool is selected on join. With no tool active, users can navigate the board without placing pixels. Shortcuts `1`–`5` select Pen, Line, Circle, Polygon, and Bucket respectively; `6` selects DDA only during a running House Challenge. Use the palette to choose among 16 colours and four team colours. Undo and Redo affect your own actions (`Ctrl+Z`, `Ctrl+Shift+Z` or `Ctrl+Y`); they preserve later multiplayer edits. Drag/pan, pinch, wheel zoom, Fit, Export PNG, the in-game team selector, and the time-lapse replay are also available.
+
+The 128 x 128 canvas is divided into four equal quadrants: Red top-left, Blue top-right, Green bottom-left, and Yellow (Gold in the palette) bottom-right. When zones are enabled, the server enforces each player's assigned zone; bucket fill is clipped to that zone. House Challenge requires zones to be enabled.
+
+## Configuration
+
+These are the configuration variables read by `server.js`:
+
+| Variable | Default | Effect |
+|---|---:|---|
+| `PORT` | `4000` | HTTP and WebSocket listen port |
+| `CANVAS_SIZE` | `128` | Square canvas size; must be an integer of at least 128 |
+| `COOLDOWN_MS` | `5000` | Per-player drawing cooldown in milliseconds; must be non-negative |
+| `DATA_DIR` | `./data` | Action log and House result storage directory |
+| `ADMIN_KEY` | unset | Required for remote host controls; without it, only direct loopback host requests are authorized |
+| `ZONES` | enabled | Set exactly to `0` to disable team zones; House Challenge will then be refused |
+| `CHALLENGE_SECS` | `300` | Default challenge duration in seconds when no duration is supplied |
+
+The active action log is `DATA_DIR/actions.ndjson`; resets archive the previous log. Completed House Challenges are written best-effort to `DATA_DIR/challenge-result-<timestamp>.json`. A write failure does not prevent the in-memory challenge result from being finalized or broadcast.
 
 ## Deploy to Render
 
-1. Push this repo to GitHub.
-2. In Render, create a Blueprint from the repository. `render.yaml` creates **one** Node Web Service, runs `npm ci` / `npm start`, generates `ADMIN_KEY`, and mounts a 1 GB persistent disk at `/var/data`.
-3. This disk-backed Blueprint uses Render's paid `starter` instance plan; persistent disks are not available on the free plan. If deploying manually, attach a persistent disk, set `DATA_DIR=/var/data`, and use the same path for its mount point. Do not treat Render's default filesystem as persistent.
-4. Share the `https://....onrender.com` link. The frontend connects to the same service over `wss://` automatically. To operate host controls, open `https://....onrender.com/?host` and enter the generated `ADMIN_KEY` (available in the Render service's environment settings). Never put the key in a URL.
+The repository's `render.yaml` defines a Render Node web service using `npm ci` and `npm start`, sets `NODE_ENV=production` and `DATA_DIR=/var/data`, generates `ADMIN_KEY`, and mounts a 1 GB persistent disk at `/var/data`. The Blueprint specifies Render's `starter` plan. A persistent disk is needed if action logs and House result files must survive service restarts; verify current Render pricing and plan availability before deployment.
 
-Locally, the action log remains in `data/actions.ndjson`. On Render, all active and archived logs are stored under the mounted disk. Reset archives the old battle and atomically replaces the active log, so a restart replays only the current battle. The `/health` endpoint reports a failing status if action-log storage becomes unavailable. Optional exports can still be downloaded with `URL=https://<your-app>.onrender.com npm run backup-log`.
+After deployment, open the service's public HTTPS URL. The client uses secure WebSockets automatically. To operate the host panel, open `<service-url>/?host` and enter the generated `ADMIN_KEY` from the service environment settings. Do not expose the key in the URL or in screenshots.
 
-## Files
+## Testing
 
+Run these commands from the repository root:
+
+| Command | What it verifies |
+|---|---|
+| `npm test` | The five original suites: rasterizer, board/history, real-server WebSocket behavior, reset/archive behavior, and Normal Battle challenge behavior |
+| `node tests/dda.test.js` | DDA rasterization inputs, endpoints, line directions/slopes, zero-length lines, limits, and invalid input |
+| `node tests/house.test.js` | House evaluator reference score, all four zones, ordering determinism, rubric details, partial/waiting states, ties, tolerances, flood fill, and Undo/Redo |
+| `node tests/house-server.test.js` | Real-server House protocol, DDA restrictions, score visibility, host-watch authorization, timer/finalization, result writing/failure, and House DDA log replay |
+| `node tests/normal_battle_golden.test.js` | Deterministic real-WebSocket Normal Battle transcript against its fixture |
+| `npm run test:server` | Existing standalone real-server WebSocket tests |
+| `npm run test:reset` | Existing reset and archive tests |
+| `npm run test:challenge` | Existing team-zone, pixel scoring, and server challenge timer tests |
+| `npm run test:browser` | Browser interaction test in Chromium; requires Python 3, Playwright for Python, and its Chromium browser installation |
+
+`npm test` intentionally does not include the separate DDA, House evaluator, House server, or golden transcript tests; run those explicitly as shown.
+
+### Optional simulated load test
+
+The load-test tool simulates WebSocket clients, reports message latency, and checks that their final canvases match a late joiner's snapshot. This is not a substitute for testing 15 real simultaneous participants on the class network.
+
+Start the server with a low test cooldown in one terminal:
+
+```sh
+COOLDOWN_MS=1000 DATA_DIR=./data-test PORT=4001 npm start
 ```
-server.js            Node + ws server: cooldown, scoreboard, action log, static files
-public/index.html    game page          public/style.css   responsive styles
-public/app.js        client: viewport, tools, palette, network, replay
-public/raster.js     OUR rasterizers (shared by browser + server)
-public/palette.js    HSB palette (shared)
-public/board.js      frame buffer + pixel owners + undo/redo (shared by server, replay, tests)
-public/lab.html      Algorithm lab: step tables for DDA / Bresenham / midpoint (use in your presentation)
-tests/*.test.js      unit + server tests   tests/browser_test.py  real-browser test
-tools/loadtest.js    load test             tools/backup-log.js, demo.js, make-demo-log.js   keep / replay a battle
-samples/             saved battle logs (sample-small = test players, demo-battle = SYNTHETIC demo, add your real one)
-render.yaml          single-service Render Blueprint with persistent action-log disk
+
+In another terminal:
+
+```sh
+URL=ws://localhost:4001 npm run loadtest -- 15 30
 ```
 
-## Git
+On PowerShell, set the variable with `$env:URL = "ws://localhost:4001"` before running the load test. Record the actual output; no load-test result is claimed here.
 
-```bash
-git init && git add . && git commit -m "Initial project skeleton"
-git remote add origin <your GitHub/GitLab URL> && git push -u origin main
+## Course evidence still required
+
+The application features and automated tests above do not establish that the course's presentation and evidence requirements have been completed. The team still needs to gather and submit:
+
+- **At least 15 simultaneous players:** run and document a live test with the required number of actual participants. The simulated load test is supplementary evidence, not proof of 15 human players.
+- **Mobile and laptop testing:** test the deployed or local application on actual phones and laptops, including drawing, pan/zoom, Undo/Redo, host actions, and House Challenge behavior. Record device/browser details and results.
+- **Screenshots and demo video:** capture the finished application, both modes, relevant controls, and a complete challenge/result flow. Avoid including host keys or other secrets.
+- **Weekly build diary:** add dated entries describing work, decisions, testing, blockers, and progress for each project week.
+- **Member contribution table:** have the project team document each member's actual contributions and supporting evidence. No member assignments are inferred in this README.
+- **AI-use declaration:** disclose the AI assistance actually used, its scope, and how the team reviewed and validated generated work, according to course policy. The team should review and complete the declaration.
+
+Do not mark these items complete until the evidence has been gathered and reviewed by the team.
+
+## Project files
+
+```text
+server.js                 Node.js HTTP/WebSocket server and authoritative game state
+public/index.html         Game page and interface structure
+public/app.js             Browser UI, drawing controls, networking, and replay
+public/style.css          Responsive interface styles
+public/raster.js          Shared rasterizers and action validation
+public/board.js            Shared board ownership and Undo/Redo history
+public/palette.js          Shared palette and team definitions
+lib/house-config.js        House rubric and evaluator thresholds
+lib/house-evaluator.js     Server-side Build a House scoring
+tests/                    Raster, board, server, reset, challenge, DDA, House, and golden transcript tests
+tools/loadtest.js          Simulated WebSocket load test
+render.yaml               Render service and persistent disk configuration
 ```
-Every member commits under their own name (`git config user.name` / `user.email`), in different weeks.

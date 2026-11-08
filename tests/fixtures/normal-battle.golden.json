@@ -1,0 +1,51 @@
+{
+  "messages": [
+    {
+      "t": "init",
+      "size": 128,
+      "grid": "<blank-grid>",
+      "teams": "<unowned-teams>",
+      "scores": [0, 0, 0, 0],
+      "online": 1,
+      "cooldown": 0,
+      "wait": 0,
+      "actions": 0,
+      "undo": 0,
+      "redo": 0,
+      "team": 0,
+      "zones": true,
+      "ch": {
+        "t": "ch",
+        "state": "idle",
+        "dur": 300000,
+        "rem": 0,
+        "final": null,
+        "winners": []
+      }
+    },
+    {
+      "t": "online",
+      "n": 1
+    },
+    {
+      "t": "px",
+      "n": 0,
+      "ts": "<timestamp>",
+      "p": "Baseline",
+      "tm": 0,
+      "tool": "line",
+      "c": 4,
+      "idx": [1290, 1291, 1292],
+      "teams": [0, 0, 0],
+      "sc": [3, 0, 0, 0]
+    },
+    {
+      "t": "ok",
+      "seq": 1,
+      "wait": 0,
+      "pixels": 3,
+      "undo": 1,
+      "redo": 0
+    }
+  ]
+}

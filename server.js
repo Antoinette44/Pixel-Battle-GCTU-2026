@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const R = require('./public/raster.js');
 const B = require('./public/board.js');
 const P = require('./public/palette.js');
+const House = require('./lib/house-evaluator.js');
 
 const PORT = process.env.PORT === undefined ? 4000 : Number(process.env.PORT);
 const SIZE = process.env.CANVAS_SIZE === undefined ? 128 : Number(process.env.CANVAS_SIZE);
@@ -30,6 +31,7 @@ const MAX_LOG_LINE_BYTES = 16 * 1024;
 let board = B.create(SIZE, SIZE, P.BG);          // frame buffer + pixel owners + undo/redo history (public/board.js)
 let log = [];                                   // action log (used for the time-lapse); undo and redo are logged too
 let scores = P.TEAMS.map(() => 0);              // pixels owned by each team, regardless of drawing colour
+let houseEvaluations = null;                    // last good server-owned house marks, indexed by team
 let mine = new Map();                           // player key -> log positions of that player's drawings (for undo)
 let redone = new Map();                         // player key -> drawings currently available to redo
 let storageError = null;
@@ -43,11 +45,15 @@ const teamOf = new Map();                       // player id -> team (the team s
    The server owns the clock. It uses a monotonic timer (not the wall clock) and sends clients only the REMAINING time,
    so a player's browser clock can never change the result.  state: 'idle' | 'running' | 'ended'                      */
 const mono = () => Number(process.hrtime.bigint() / 1000000n);
-let ch = { state: 'idle', durMs: CHALLENGE_SECS * 1000, endsAt: 0, final: null, winners: [] };
+let ch = { state: 'idle', mode: 'battle', durMs: CHALLENGE_SECS * 1000, endsAt: 0, final: null, winners: [] };
 let chTimer = null, chTick = null;
 const remainingMs = () => ch.state === 'running' ? Math.max(0, ch.endsAt - mono()) : 0;
 const chOver = () => ch.state === 'ended' || (ch.state === 'running' && mono() >= ch.endsAt);
-const chInfo = () => ({ t: 'ch', state: ch.state, dur: ch.durMs, rem: remainingMs(), final: ch.final, winners: ch.winners });
+const chInfo = () => ({
+  t: 'ch', state: ch.state, dur: ch.durMs, rem: remainingMs(), final: ch.final, winners: ch.winners,
+  ...(ch.state === 'idle' ? {} : { mode: ch.mode }),
+  ...(ch.state === 'ended' && ch.mode === 'house' ? { resultSaved: ch.resultSaved } : {}),
+});
 
 // A short one-way hash of the player id goes into the public log, so undo survives a server restart
 // without revealing the secret id that the player uses to identify themselves.
@@ -156,20 +162,103 @@ function rollbackEntry(offset) {
 
 const gridString = () => Array.from(board.fb.data, v => v.toString(36)).join('');
 
+function refreshHouseEvaluations() {
+  try {
+    houseEvaluations = House.evaluateAll({ size: SIZE, board, log, zoneRect: B.zoneRect });
+    return true;
+  } catch (error) {
+    console.error('House evaluation failed; retaining the last good marks:', error.message);
+    return false;
+  }
+}
+function sendHouseTeam(ws) {
+  if (!ws.player || !houseEvaluations) return;
+  const result = houseEvaluations[ws.player.team];
+  if (!result) return;
+  send(ws, {
+    t: 'house', mode: ch.mode, team: ws.player.team,
+    marks: result.marks, house: result.house, algo: result.algo, items: result.items,
+  });
+}
+function sendHostHouseScores(ws) {
+  if (!ws.hostWatch || ch.mode !== 'house' || !houseEvaluations) return;
+  if (!isAdmin(ws.hostWatchKey, ws.request)) {
+    ws.hostWatch = false;
+    ws.hostWatchKey = null;
+    return;
+  }
+  send(ws, {
+    t: 'houseWatch', state: ch.state,
+    teams: houseEvaluations.map(result => ({
+      team: result.team, marks: result.marks, house: result.house, algo: result.algo, items: result.items,
+    })),
+  });
+}
+function publishHouseEvaluations() {
+  if (ch.mode !== 'house' || !houseEvaluations) return;
+  for (const ws of wss.clients) {
+    if (ws.readyState !== 1) continue;
+    sendHouseTeam(ws);
+    sendHostHouseScores(ws);
+  }
+}
+function writeHouseResult(result) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const timestamp = Date.now();
+    const resultFile = path.join(DATA_DIR, `challenge-result-${timestamp}.json`);
+    fs.writeFileSync(resultFile, JSON.stringify(result, null, 2), { flag: 'wx' });
+    return true;
+  } catch (error) {
+    console.error('Could not write House Challenge results:', error.message);
+    return false;
+  }
+}
 function finishChallenge() {
   if (ch.state !== 'running') return;
   clearTimeout(chTimer); clearInterval(chTick);
   ch.state = 'ended';
-  ch.final = scores.slice();                                     // frozen: nothing can be drawn any more
-  const best = Math.max(...ch.final);
-  ch.winners = ch.final.map((s, i) => [s, i]).filter(([s]) => s === best).map(([, i]) => i);   // 2+ winners = draw
+  if (ch.mode === 'house') {
+    refreshHouseEvaluations();
+    const teams = houseEvaluations;
+    if (teams) {
+      ch.final = teams.map(result => result.marks);
+      const best = Math.max(...ch.final);
+      ch.winners = ch.final.map((score, team) => [score, team]).filter(([score]) => score === best).map(([, team]) => team);
+      ch.result = {
+        endedAt: new Date().toISOString(),
+        durationMs: ch.durMs,
+        scores: ch.final,
+        winners: ch.winners,
+        teams,
+      };
+      ch.resultSaved = writeHouseResult(ch.result);
+    } else {
+      ch.final = null;
+      ch.winners = [];
+      ch.resultSaved = false;
+      console.error('House Challenge ended without a successful evaluation; results were not written.');
+    }
+    broadcast({ t: 'houseFinal', scores: ch.final, winners: ch.winners, teams });
+    publishHouseEvaluations();
+  } else {
+    ch.final = scores.slice();                                     // frozen: nothing can be drawn any more
+    const best = Math.max(...ch.final);
+    ch.winners = ch.final.map((s, i) => [s, i]).filter(([s]) => s === best).map(([, i]) => i);   // 2+ winners = draw
+  }
   broadcast(chInfo());
 }
-function startChallenge(secs) {
+function startChallenge(secs, mode = 'battle') {
+  if (mode !== 'battle' && mode !== 'house') return { ok: false, error: 'Unknown challenge mode' };
+  if (mode === 'house' && !ZONES) return { ok: false, error: 'House Challenge requires team zones (ZONES must be enabled)' };
   secs = Math.min(MAX_CHALLENGE_SECS, Math.max(MIN_CHALLENGE_SECS, Math.round(Number(secs) || CHALLENGE_SECS)));
   const r = resetBattle();                                       // fair start: empty canvas, scores 0 (old log is archived)
   if (!r.ok) return r;
-  ch = { state: 'running', durMs: secs * 1000, endsAt: mono() + secs * 1000, final: null, winners: [] };
+  ch = { state: 'running', mode, durMs: secs * 1000, endsAt: mono() + secs * 1000, final: null, winners: [] };
+  if (mode === 'house') {
+    refreshHouseEvaluations();
+    publishHouseEvaluations();
+  }
   chTimer = setTimeout(finishChallenge, secs * 1000);
   chTick = setInterval(() => broadcast(chInfo()), 5000);         // periodic re-sync of the remaining time
   broadcast(chInfo());
@@ -273,7 +362,18 @@ function sendInit(ws) {
   const wait = Math.max(0, (nextAllowed.get(ws.player.id) || 0) - Date.now());
   const key = playerKey(ws.player.id);
   const teams = Array.from(board.teams, team => (team + 1).toString(36)).join('');
-  send(ws, { t: 'init', size: SIZE, grid: gridString(), teams, scores, online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length, undo: undoable(key), redo: redoable(key), team: ws.player.team, zones: ZONES, ch: chInfo() });
+  send(ws, {
+    t: 'init', size: SIZE, grid: gridString(), teams,
+    ...(ch.mode === 'house' ? {} : { scores }),
+    online: onlineCount(), cooldown: COOLDOWN_MS, wait, actions: log.length,
+    undo: undoable(key), redo: redoable(key), team: ws.player.team, zones: ZONES, ch: chInfo(),
+  });
+  if (ch.mode === 'house') {
+    sendHouseTeam(ws);
+    if (ch.state === 'ended' && houseEvaluations) {
+      send(ws, { t: 'houseFinal', scores: ch.final, winners: ch.winners, teams: houseEvaluations });
+    }
+  }
 }
 
 let resetting = false;                           // guard: two resets can never overlap
@@ -314,12 +414,13 @@ function doReset() {
   board = B.create(SIZE, SIZE, P.BG);
   log = [];
   scores = P.TEAMS.map(() => 0);
+  houseEvaluations = null;
   mine = new Map();
   redone = new Map();
   nextAllowed.clear();
   nextUndo.clear();
   clearTimeout(chTimer); clearInterval(chTick);
-  ch = { state: 'idle', durMs: ch.durMs, endsAt: 0, final: null, winners: [] };
+  ch = { state: 'idle', mode: 'battle', durMs: ch.durMs, endsAt: 0, final: null, winners: [] };
   broadcast({ t: 'reset' });                       // tell every browser to drop its local battle state ...
   for (const c of wss.clients) if (c.player) sendInit(c);   // ... then send the blank canvas, zero scores, own team + cooldown
 }
@@ -328,6 +429,9 @@ const cleanName = (s) => (typeof s === 'string' ? s : '').replace(/[^\p{L}\p{N} 
 
 wss.on('connection', (ws, req) => {
   ws.player = null;
+  ws.hostWatch = false;
+  ws.hostWatchKey = null;
+  ws.request = req;
   ws.alive = true;
   ws.lastSeq = 0;
   ws.on('pong', () => { ws.alive = true; });
@@ -337,6 +441,19 @@ wss.on('connection', (ws, req) => {
     try { m = JSON.parse(data); }
     catch (_) { ws.close(1003, 'Messages must be valid JSON'); return; }
     if (!m || typeof m !== 'object' || Array.isArray(m)) { ws.close(1008, 'Invalid message'); return; }
+
+    if (m.t === 'watch') {
+      ws.hostWatch = false;
+      ws.hostWatchKey = null;
+      if (typeof m.key !== 'string' || !m.key || !isAdmin(m.key, ws.request)) {
+        return send(ws, { t: 'watch', ok: false, msg: 'Host key required' });
+      }
+      ws.hostWatch = true;
+      ws.hostWatchKey = m.key;
+      send(ws, { t: 'watch', ok: true });
+      sendHostHouseScores(ws);
+      return;
+    }
 
     if (m.t === 'hello') {
       if (ws.player) { ws.close(1008, 'Player identity is already established'); return; }
@@ -356,7 +473,7 @@ wss.on('connection', (ws, req) => {
 
     if (m.t === 'admin') {
       if (!isAdmin(m.key, req)) return send(ws, { t: 'adm', ok: false, msg: 'Host key required' });
-      if (m.cmd === 'start') { const r = startChallenge(m.secs); return send(ws, { t: 'adm', ok: r.ok, msg: r.ok ? 'Challenge started' : r.error }); }
+      if (m.cmd === 'start') { const r = startChallenge(m.secs, m.mode || 'battle'); return send(ws, { t: 'adm', ok: r.ok, msg: r.ok ? 'Challenge started' : r.error }); }
       if (m.cmd === 'reset') { const r = resetBattle(); return send(ws, { t: 'adm', ok: r.ok, msg: r.ok ? 'Battle reset' : r.error }); }
       return;
     }
@@ -384,6 +501,8 @@ wss.on('connection', (ws, req) => {
     }
 
     if (m.t === 'act') {
+      if (m.tool === 'dda' && (ch.state !== 'running' || ch.mode !== 'house'))
+        return send(ws, { t: 'rej', seq: m.seq, reason: 'DDA is available only during a running House Challenge', wait: 0 });
       const now = Date.now();
       const allowedAt = nextAllowed.get(ws.player.id) || 0;
       if (now < allowedAt) return send(ws, { t: 'rej', seq: m.seq, reason: 'Cooldown: wait a moment', wait: allowedAt - now });
@@ -420,8 +539,14 @@ wss.on('connection', (ws, req) => {
       countChanges(res.changes);
       log.push(entry); track(entry, n);
 
-      broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: a.tool, c: a.c,
-                  idx: res.changes.map(ch => ch[0]), teams: res.changes.map(ch => ch[4]), sc: scores });
+      const update = { t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: a.tool, c: a.c,
+        idx: res.changes.map(ch => ch[0]), teams: res.changes.map(ch => ch[4]) };
+      if (ch.mode !== 'house') update.sc = scores;
+      broadcast(update);
+      if (ch.mode === 'house') {
+        refreshHouseEvaluations();
+        publishHouseEvaluations();
+      }
       send(ws, { t: 'ok', seq: m.seq, wait: COOLDOWN_MS, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
       return;
     }
@@ -447,8 +572,14 @@ wss.on('connection', (ws, req) => {
       log.push(entry); track(entry, n);
 
       // every restored pixel can have a different colour, so send one colour per pixel
-      broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'undo',
-                  idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), teams: res.changes.map(ch => ch[4]), sc: scores });
+      const update = { t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'undo',
+        idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), teams: res.changes.map(ch => ch[4]) };
+      if (ch.mode !== 'house') update.sc = scores;
+      broadcast(update);
+      if (ch.mode === 'house') {
+        refreshHouseEvaluations();
+        publishHouseEvaluations();
+      }
       send(ws, { t: 'undone', seq: m.seq, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
       return;
     }
@@ -472,13 +603,23 @@ wss.on('connection', (ws, req) => {
 
       countChanges(res.changes);
       log.push(entry); track(entry, n);
-      broadcast({ t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'redo',
-                  idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), teams: res.changes.map(ch => ch[4]), sc: scores });
+      const update = { t: 'px', n, ts: now, p: entry.p, tm: entry.tm, tool: 'redo',
+        idx: res.changes.map(ch => ch[0]), cols: res.changes.map(ch => ch[2]), teams: res.changes.map(ch => ch[4]) };
+      if (ch.mode !== 'house') update.sc = scores;
+      broadcast(update);
+      if (ch.mode === 'house') {
+        refreshHouseEvaluations();
+        publishHouseEvaluations();
+      }
       send(ws, { t: 'redone', seq: m.seq, pixels: res.changes.length, undo: undoable(key), redo: redoable(key) });
     }
   });
 
-  ws.on('close', () => { if (ws.player) broadcast({ t: 'online', n: onlineCount() }); });
+  ws.on('close', () => {
+    ws.hostWatch = false;
+    ws.hostWatchKey = null;
+    if (ws.player) broadcast({ t: 'online', n: onlineCount() });
+  });
   ws.on('error', (error) => console.warn('WebSocket error:', error.message));
 });
 
