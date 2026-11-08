@@ -27,13 +27,17 @@ function startServer() {
   const p = spawn('node', [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, PORT, DATA_DIR: dir, COOLDOWN_MS: '300', ZONES: '0' }, stdio: 'ignore' });
   return p;
 }
-function client(name, team) {
+function client(name, team, options = {}) {
   return new Promise((resolve) => {
     const ws = new WebSocket('ws://localhost:' + PORT), c = { ws, msgs: [], grid: null, scores: null, teams: null };
-    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', id: 'testid-' + name + '-' + Math.random().toString(16).slice(2), name, team })));
+    ws.on('open', () => ws.send(JSON.stringify({
+      t: 'hello', id: options.id || 'testid-' + name + '-' + Math.random().toString(16).slice(2), name, team,
+      ...(options.teamChoice === undefined ? {} : { teamChoice: options.teamChoice }),
+    })));
     ws.on('message', (d) => {
       const m = JSON.parse(d); c.msgs.push(m);
       if (m.t === 'init') {
+        c.init = m;
         c.grid = m.grid; c.teams = Array.from(m.teams, v => parseInt(v, 36) - 1);
         c.scores = m.scores; c.undo = m.undo; c.redo = m.redo; resolve(c);
       }
@@ -92,6 +96,18 @@ const recount = (owners) => P.TEAMS.map(t => owners.filter(team => team === t.id
     assert.strictEqual(await closeCodeForMessage('{'), 1003, 'invalid JSON must be rejected');
     assert.strictEqual(await closeCodeForMessage('x'.repeat(8193)), 1009, 'oversized messages must be rejected');
     console.log('  ok  malformed and oversized WebSocket messages are closed');
+
+    const teamChoiceId = 'team-choice-test-001';
+    const remembered = await client('Picker', 0, { id: teamChoiceId });
+    assert.strictEqual(remembered.init.team, 0);
+    remembered.ws.close();
+    const selected = await client('Picker', 0, { id: teamChoiceId, teamChoice: 1 });
+    assert.strictEqual(selected.init.team, 1, 'an explicit join selection overrides a remembered team');
+    selected.ws.close();
+    const reconnect = await client('Picker', 0, { id: teamChoiceId });
+    assert.strictEqual(reconnect.init.team, 1, 'subsequent reconnects keep the newly selected team');
+    reconnect.ws.close();
+    console.log('  ok  explicit join team choice updates server state and persists on reconnect');
 
     const a = await client('Ann', 0), b = await client('Ben', 1);
     const paletteColour = 3;

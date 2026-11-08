@@ -21,6 +21,7 @@ def join(pg,name,team):
     pg.click(f'#teamPick button[data-t="{team}"]')
     if name=='Ama': pg.screenshot(path=S+'03_team.png')
     pg.click('#toConfirm'); pg.click('#joinBtn')
+    assert pg.input_value('#teamSel') == str(team), 'in-game team selector must match the team picked during joining'
     pg.wait_for_function("document.getElementById('statusTxt').textContent==='live'")
     if pg.is_visible('#tourCard'):
         if name=='Ama':
@@ -57,10 +58,15 @@ with sync_playwright() as p:
     # ---------- laptop player
     pg=b.new_page(viewport={'width':1280,'height':900}); hook(pg,'laptop')
     join(pg,'Ama',0)
+    assert pg.locator('#tools button.on').count()==0, 'joining must not preselect a drawing tool'
+    tap(pg,20,20)
+    assert log()==[], 'tapping the canvas with no tool selected must not draw'
+    assert pg.is_disabled('#place'), 'Place must stay disabled until a drawing tool is selected'
     pg.screenshot(path=S+'04_game_empty.png')
     colours={}
     # pen
     tool(pg,'pen'); tap(pg,20,20); place(pg)
+    assert pg.locator('#tools button.on').get_attribute('data-id')=='pen'
     tool(pg,'pen')
     x0,y0=center(pg,24,20); x1,y1=center(pg,32,25)
     pg.mouse.move(x0,y0); pg.mouse.down(); pg.mouse.move(x1,y1,steps=8); pg.mouse.up()

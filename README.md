@@ -31,7 +31,7 @@ The HTTP server binds to `0.0.0.0`; the browser chooses `ws://` or `wss://` from
 | # | Requirement | Where |
 |---|-------------|-------|
 | 1 | Shared canvas >= 128x128, own `setPixel` only | `raster.js: setPixel`; the frame buffer is a `Uint8Array` of palette indices. Canvas elements only blit the finished buffer (`putImageData` / `drawImage`). |
-| 2 | Pen, line (Bresenham), circle (midpoint), polygon (scan-line), bucket (queue flood fill) | `raster.js: bresenham, midpointCircle/circle, fillPolygon, floodFill`. Pen pointer strokes join sampled points with Bresenham; DDA is included too (Algorithm lab). |
+| 2 | Pen, line (Bresenham), circle (midpoint), polygon (scan-line), bucket (queue flood fill) | No drawing tool is selected initially, so the canvas starts in navigation mode; choose a tool to draw. `raster.js: bresenham, midpointCircle/circle, fillPolygon, floodFill`. Pen pointer strokes join sampled points with Bresenham; DDA is included too (Algorithm lab). |
 | 3 | Real-time sync, new player gets the canvas | `server.js` broadcasts every action; the `init` message sends the whole grid on join and on reconnect. |
 | 4 | 16-colour HSB palette + team colours | `palette.js` (hand-written HSB<->RGB). The UI shows H, S, B, RGB and HEX for the selected colour and in the "Palette sheet" table. Colours 16-19 are team colours. |
 | 5 | Cooldown + live team scoreboard | Cooldown is enforced on the **server** per player id (5 s). Every pixel stores its drawing colour and owning team separately; the scoreboard counts team ownership, updated on every change. |

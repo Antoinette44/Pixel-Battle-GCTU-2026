@@ -342,7 +342,10 @@ wss.on('connection', (ws, req) => {
       if (ws.player) { ws.close(1008, 'Player identity is already established'); return; }
       if (typeof m.id !== 'string' || !/^[\w-]{8,64}$/.test(m.id)) { ws.close(1008, 'Invalid player identity'); return; }
       const asked = Number.isInteger(m.team) && m.team >= 0 && m.team < P.TEAMS.length ? m.team : 0;
-      const team = teamOf.has(m.id) ? teamOf.get(m.id) : asked;   // a returning player keeps the team the server knows
+      const remembered = teamOf.has(m.id);
+      const selected = Number.isInteger(m.teamChoice) && m.teamChoice >= 0 && m.teamChoice < P.TEAMS.length;
+      const team = ch.state === 'running' && remembered ? teamOf.get(m.id) :
+        selected ? m.teamChoice : remembered ? teamOf.get(m.id) : asked;
       teamOf.set(m.id, team);
       ws.player = { id: m.id, name: cleanName(m.name), team };
       sendInit(ws);

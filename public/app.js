@@ -26,13 +26,14 @@
   let SIZE = 128;
   let fb = Raster.createFB(SIZE, SIZE, BG);
   let pixelTeams = new Int8Array(SIZE * SIZE).fill(-1);
-  let tool = 'pen', pts = [], colour = 16, myTeam = hasSavedTeam ? parsedTeam : 0;
+  let tool = null, pts = [], colour = 16, myTeam = hasSavedTeam ? parsedTeam : 0;
   let readyAt = 0, cooldownMs = 5000, connected = false, seq = 0, ws = null, retry = 500, scores = TEAMS.map(() => 0);
   let zonesOn = true;                   // server tells us whether team-zone restriction is enforced
   let ch = { state: 'idle', dur: 300000, endAt: 0, final: null, winners: [] };   // challenge state; endAt is on THIS browser's monotonic clock
   let shownResult = false;
   let undoLeft = 0;                       // how many of MY drawings can still be undone (server tells us)
   let redoLeft = 0;                       // how many of MY undone drawings can be restored
+  let pendingTeamChoice = null;
   let pid = store.get('pb_id', '');
   if (!/^[\w-]{8,64}$/.test(pid)) {
     pid = Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
@@ -323,15 +324,19 @@
   }
   function selectTool(id) {
     tool = id; pts = [];
-    for (const b of $('tools').children) b.classList.toggle('on', b.dataset.id === id);
-    $('fillOpt').classList.toggle('hidden', id !== 'circle');
-    $('undoPt').classList.toggle('hidden', id !== 'polygon');
-    $('hint').textContent = toolDef().hint;
+    for (const b of $('tools').children) {
+      const selected = b.dataset.id === tool;
+      b.classList.toggle('on', selected);
+      b.setAttribute('aria-pressed', String(selected));
+    }
+    $('fillOpt').classList.toggle('hidden', tool !== 'circle');
+    $('undoPt').classList.toggle('hidden', tool !== 'polygon');
+    $('hint').textContent = toolDef() ? toolDef().hint : 'Pan and zoom the canvas, or select a drawing tool.';
     updatePreview();
   }
 
   function tap(x, y) {
-    if (!Raster.inBounds(fb, x, y)) return;
+    if (!tool || !Raster.inBounds(fb, x, y)) return;
     if (tool === 'pen' || tool === 'fill') pts = [[x, y]];
     else if (tool === 'line' || tool === 'circle') { if (pts.length === 0) pts = [[x, y]]; else pts = [pts[0], [x, y]]; }
     else if (tool === 'polygon') { if (pts.length < Raster.LIMITS.maxPoly) pts.push([x, y]); else toast('A polygon can have at most ' + Raster.LIMITS.maxPoly + ' corners'); }
@@ -339,6 +344,7 @@
   }
 
   function buildAction() {
+    if (!tool) return null;
     if (pts.length < toolDef().need) return null;
     return { tool, pts: pts.map(p => [p[0], p[1]]), c: colour, f: $('filled').checked ? 1 : 0 };
   }
@@ -489,7 +495,10 @@
     ws = new WebSocket(`${proto}://${location.host}`);
     ws.onopen = () => {
       retry = 500;
-      ws.send(JSON.stringify({ t: 'hello', id: pid, name: store.get('pb_name', 'Player'), team: myTeam }));
+      ws.send(JSON.stringify({
+        t: 'hello', id: pid, name: store.get('pb_name', 'Player'), team: myTeam,
+        ...(pendingTeamChoice === null ? {} : { teamChoice: pendingTeamChoice }),
+      }));
     };
     ws.onclose = () => { setStatus(false, 'reconnecting...'); setTimeout(connect, retry); retry = Math.min(retry * 2, 5000); };
     ws.onerror = () => {};
@@ -504,6 +513,7 @@
         $('online').textContent = m.online; $('actions').textContent = m.actions; undoLeft = m.undo || 0; redoLeft = m.redo || 0;
         zonesOn = m.zones !== false;
         if (Number.isInteger(m.team)) setMyTeam(m.team);                       // the server remembers my team
+        pendingTeamChoice = null;
         applyChallenge(m.ch);
         setStatus(true, 'live'); updatePreview(); maybeStartTour();
       } else if (m.t === 'px') {
@@ -726,7 +736,9 @@
       b.type = 'button'; b.textContent = t.name; b.dataset.t = t.id;
       b.style.borderColor = COLOURS[t.colour].hex;
       b.onclick = () => {
-        myTeam = t.id; teamPicked = true; $('toConfirm').disabled = false;
+        setMyTeam(t.id);
+        pendingTeamChoice = t.id;
+        teamPicked = true; $('toConfirm').disabled = false;
         for (const x of pick.children) x.classList.toggle('on', +x.dataset.t === myTeam);
       };
       pick.appendChild(b);
@@ -823,6 +835,6 @@
   }
 
   buildTools(); buildPalette(); buildScoreboard(); buildJoin();
-  selectTool('pen'); selectColour(TEAMS[myTeam].colour); fitView(); renderScores();
+  selectTool(null); selectColour(TEAMS[myTeam].colour); fitView(); renderScores();
   setSize(SIZE); renderAll(); setStatus(false, 'not joined');
 })();
