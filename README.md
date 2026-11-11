@@ -33,22 +33,6 @@ Apply computer graphics algorithms to construct a house within your team's zone.
 
 The challenge is evaluated by the server using a deterministic scoring system.
 
-## 🖼️ Game Screenshots
-
-Add screenshots of the actual running game below. Replace the example filenames with the image filenames you add to your repository.
-
-### Normal Battle
-
-![Pixel Battle Normal Battle](screenshots/normal-battle.png)
-
-### Build a House Challenge
-
-![Build a House Challenge](screenshots/house-challenge.png)
-
-### Scoreboard and Evaluation
-
-![Pixel Battle Scoreboard](screenshots/scoreboard.png)
-
 ## 🕹️ Teams
 
 The game has four competing teams, each assigned a section of the canvas.
